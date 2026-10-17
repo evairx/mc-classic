@@ -277,6 +277,7 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
         .route("/classic/status", get(status))
         .route("/mcupdate.tumblr.com/", get(news::first_page))
         .route("/mcupdate.tumblr.com/page/{page}", get(news::more))
+        .route("/mcupdate.tumblr.com/sidebar", get(news::sidebar))
         .route("/mcupdate.tumblr.com/{*path}", get(news::file))
         .fallback(static_file)
         .with_state(app.clone());

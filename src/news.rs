@@ -1,13 +1,16 @@
-//! The launcher's news pane, made from `assets/`: `news.html` and the files it links to, such as
-//! the images in `assets/assets/`, all served from this exe. The pane is a Swing `JEditorPane`,
-//! which renders simple HTML and runs no JavaScript, so the infinite scroll lives in the agent
-//! (`NewsScroller.java`): the first page holds the newest posts, and the agent appends
-//! `page/<n>` as the player nears the bottom, until a page comes back empty.
+//! The launcher's news pane: the web in `assets/`, served from this exe. `index.html` is the
+//! first page and `2.html`, `3.html`... the older ones, as on the Tumblr it stands in for. The
+//! pane is a Swing `JEditorPane`, which renders simple HTML and runs no JavaScript, so the agent
+//! (`NewsScroller.java`, `NewsSidebar.java`) does what a script would:
+//! - infinite scroll: near the bottom it appends `page/<n>`, the posts of `<n>.html` alone, so
+//!   the "Minecraft News" title shows only once, until a page comes back empty;
+//! - a fixed sidebar: it shows `sidebar`, the sidebar of `index.html`, in a pane of its own beside
+//!   the posts, and takes it out of the page.
 //!
-//! The posts are the `<div class="post ...">` blocks of `news.html`, newest first. Whatever lies
-//! between them (the spacers) is dropped and put back between the posts each page holds.
+//! The posts are the `<div class="post ...">` blocks of a page. Whatever lies between them (the
+//! spacers) is dropped and put back between the posts each page adds.
 
-use std::{path::Path as FilePath, sync::OnceLock};
+use std::path::Path as FilePath;
 
 use axum::{
     extract::Path,
@@ -18,80 +21,78 @@ use axum::{
 /// Every file under `assets/`, as (path relative to it, contents). See build.rs.
 const FILES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 
-const PAGE: &str = include_str!("../assets/news.html");
-/// Posts per page.
-const PAGE_SIZE: usize = 5;
+const FIRST_PAGE: &str = "index.html";
 const SPACER: &str = "\n\n              <div class=\"spacer\"></div>\n\n              ";
 
-struct News {
-    /// `news.html` up to the first post.
-    head: String,
-    posts: Vec<String>,
-    /// `news.html` after the last post, without its footer: the "Older" link went to Tumblr,
-    /// and the agent loads older posts instead.
-    tail: String,
-}
-
-fn news() -> &'static News {
-    static NEWS: OnceLock<News> = OnceLock::new();
-    NEWS.get_or_init(|| split(PAGE))
-}
-
-/// The first page: `news.html` with only the newest posts.
+/// The first page: `index.html` without its footer, whose links to the other pages the infinite
+/// scroll replaces.
 pub async fn first_page() -> Response {
-    let news = news();
-    let shown = &news.posts[..PAGE_SIZE.min(news.posts.len())];
-    log!("GET noticias: {} de {} posts", shown.len(), news.posts.len());
-    html(format!("{}{}{}", news.head, shown.join(SPACER), news.tail))
+    let Some(page) = text(FIRST_PAGE) else { return not_found(FIRST_PAGE) };
+    log!("GET noticias: {FIRST_PAGE}");
+    html(remove_block(page, "<div id=\"footer", "div"))
 }
 
-/// Posts of page `page` (2 onwards), each after a spacer, for the agent to append. Empty once
-/// there are no more.
+/// The posts of `<page>.html` (2 onwards), each after a spacer, for the agent to append. Empty
+/// once there are no more pages.
 pub async fn more(Path(page): Path<usize>) -> Response {
     if page < 2 {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let posts = news().posts.iter().skip((page - 1).saturating_mul(PAGE_SIZE)).take(PAGE_SIZE);
-    let body: String = posts.map(|post| format!("{SPACER}{post}")).collect();
-    log!("GET noticias, página {page}: {} bytes", body.len());
-    html(body)
+    let posts = text(&format!("{page}.html")).map(posts).unwrap_or_default();
+    log!("GET noticias, página {page}: {} posts", posts.len());
+    html(posts.iter().map(|post| format!("{SPACER}{post}")).collect())
+}
+
+/// The sidebar of `index.html` as a page of its own, with the same styles.
+pub async fn sidebar() -> Response {
+    let Some(page) = text(FIRST_PAGE) else { return not_found(FIRST_PAGE) };
+    let cell = page.find("class=\"sidebar\"").and_then(|at| page[..at].rfind("<td"));
+    let (Some(start), Some(body)) = (cell, page.find("<body")) else { return not_found("la barra lateral") };
+    let Some(end) = block_end(page, start, "td") else { return not_found("la barra lateral") };
+    let head = &page[..page[body..].find('>').map_or(page.len(), |i| body + i + 1)];
+    html(format!("{head}\n  <table width=\"100%\"><tbody><tr>{}</tr></tbody></table>\n</body>\n</html>\n", &page[start..end]))
 }
 
 /// Any other file of `assets/`, such as `assets/bg_main.png`.
 pub async fn file(Path(path): Path<String>) -> Response {
-    let Some((name, bytes)) = FILES.iter().find(|(name, _)| *name == path) else {
-        log!("GET 404 /mcupdate.tumblr.com/{path} (no está en assets/)");
-        return StatusCode::NOT_FOUND.into_response();
-    };
+    let Some((name, bytes)) = FILES.iter().find(|(name, _)| *name == path) else { return not_found(&path) };
     log!("GET 200 /mcupdate.tumblr.com/{path} ({} bytes)", bytes.len());
     ([(header::CONTENT_TYPE, crate::content_type(FilePath::new(name)))], *bytes).into_response()
+}
+
+fn text(name: &str) -> Option<&'static str> {
+    FILES.iter().find(|(file, _)| *file == name).and_then(|(_, bytes)| std::str::from_utf8(bytes).ok())
 }
 
 fn html(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
 }
 
-/// Splits the page around its posts. A page without posts stays whole, as its head.
-fn split(page: &str) -> News {
+fn not_found(what: &str) -> Response {
+    log!("GET 404 noticias: {what} no está en assets/");
+    StatusCode::NOT_FOUND.into_response()
+}
+
+fn posts(page: &str) -> Vec<&str> {
     let mut posts = Vec::new();
-    let (mut first, mut last) = (None, 0);
     let mut from = 0;
     while let Some(start) = find_div(page, from, "<div class=\"post") {
-        let Some(end) = block_end(page, start) else { break };
-        first.get_or_insert(start);
-        posts.push(page[start..end].to_string());
-        (last, from) = (end, end);
+        let Some(end) = block_end(page, start, "div") else { break };
+        posts.push(&page[start..end]);
+        from = end;
     }
-    let Some(first) = first else {
-        return News { head: page.to_string(), posts, tail: String::new() };
-    };
-    let mut tail = page[last..].to_string();
-    if let Some(start) = find_div(&tail, 0, "<div id=\"footer") {
-        if let Some(end) = block_end(&tail, start) {
-            tail.replace_range(start..end, "");
+    posts
+}
+
+/// `html` without the first `<tag>` block that starts with `opening`.
+fn remove_block(html: &str, opening: &str, tag: &str) -> String {
+    let mut html = html.to_string();
+    if let Some(start) = find_div(&html, 0, opening) {
+        if let Some(end) = block_end(&html, start, tag) {
+            html.replace_range(start..end, "");
         }
     }
-    News { head: page[..first].to_string(), posts, tail }
+    html
 }
 
 /// The next `<div` from `from` that starts with `opening`, a class or id that ends there or
@@ -107,20 +108,21 @@ fn find_div(html: &str, mut from: usize, opening: &str) -> Option<usize> {
     None
 }
 
-/// The end of the `<div>` that starts at `start`, past its matching `</div>`.
-fn block_end(html: &str, start: usize) -> Option<usize> {
+/// The end of the `<tag>` element that starts at `start`, past its matching closing tag.
+fn block_end(html: &str, start: usize, tag: &str) -> Option<usize> {
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
     let mut depth = 0;
     let mut at = start;
     loop {
-        let close = html[at..].find("</div>").map(|i| at + i)?;
-        match html[at..].find("<div").map(|i| at + i) {
-            Some(open) if open < close => {
+        let next_close = html[at..].find(&close).map(|i| at + i)?;
+        match html[at..].find(&open).map(|i| at + i) {
+            Some(next_open) if next_open < next_close => {
                 depth += 1;
-                at = open + "<div".len();
+                at = next_open + open.len();
             }
             _ => {
                 depth -= 1;
-                at = close + "</div>".len();
+                at = next_close + close.len();
                 if depth == 0 {
                     return Some(at);
                 }
