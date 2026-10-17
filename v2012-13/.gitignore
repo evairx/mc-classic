@@ -1,5 +1,4 @@
 /target/
 # El launcher original de Mojang: entra al build, pero no se redistribuye en el repositorio.
 /Minecraft.exe
-/README.md
 /web/
