@@ -584,6 +584,7 @@ dependencies = [
  "md-5",
  "pelite",
  "rcgen",
+ "ring",
  "rustls",
  "rustls-pki-types",
  "serde",

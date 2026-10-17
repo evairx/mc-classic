@@ -221,7 +221,7 @@ impl Bridge {
             ("classpath", classpath),
             ("classpath_separator", ";".to_string()),
             ("launcher_name", "minecraft-launcher-classic".to_string()),
-            ("launcher_version", env!("CARGO_PKG_VERSION").to_string()),
+            ("launcher_version", crate::updater::CURRENT.to_string()),
         ]);
         values.insert("resolution_width", width.to_string());
         values.insert("resolution_height", height.to_string());

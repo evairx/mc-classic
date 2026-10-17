@@ -6,7 +6,9 @@
 //!   is. It is Mojang's file, so it is not in the repository;
 //! - that exe's own icon, so this one looks the same in Explorer and the taskbar, and a manifest
 //!   for the Windows 10 dialogs (common controls 6, which the progress dialog needs);
-//! - every file in `assets/`, the web the launcher shows as its news (`src/news.rs`).
+//! - every file in `assets/`, the web the launcher shows as its news (`src/news.rs`);
+//! - the version in `version.json`, as `CLASSIC_VERSION`: the one updates compare against, and
+//!   the one a release of this launcher is tagged with (`.github/workflows/release.yml`).
 //!
 //! `cargo dist` (`.cargo/config.toml`) builds the exe to hand out, with the release profile of
 //! Cargo.toml: optimized for size, stripped.
@@ -45,6 +47,8 @@ fn main() {
     println!("cargo:rerun-if-changed=Minecraft.exe");
     println!("cargo:rerun-if-env-changed=MINECRAFT_EXE");
     println!("cargo:rerun-if-env-changed=JAVA_HOME");
+    println!("cargo:rerun-if-env-changed=CI");
+    println!("cargo:rerun-if-changed=version.json");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
     if env::var("PROFILE").is_ok_and(|profile| profile == "debug") {
         println!("cargo:warning=Build de prueba, sin optimizar. El Minecraft.exe para repartir se hace con `cargo dist`: target\\release\\Minecraft.exe");
@@ -53,12 +57,15 @@ fn main() {
     build_jar(Path::new("agent/src"), &out.join("agent-classes"), &out.join("classic-agent.jar"), Some("agent/MANIFEST.MF"));
     build_jar(Path::new("bridge/src"), &out.join("bridge-classes"), &out.join("bridge.jar"), None);
     embed_assets(Path::new("assets"), &out.join("assets.rs"));
+    println!("cargo:rustc-env=CLASSIC_VERSION={}", version());
 
     let source = env::var_os("MINECRAFT_EXE").map_or_else(|| PathBuf::from("Minecraft.exe"), PathBuf::from);
     let minecraft = fs::read(&source).unwrap_or_else(|e| {
         panic!("no se pudo leer {} ({e}). Copia el Minecraft.exe original de 2012 a la raiz del proyecto o define MINECRAFT_EXE", source.display())
     });
     if format!("{:x}", Sha1::digest(&minecraft)) != MINECRAFT_EXE_SHA1 {
+        // A release (GitHub Actions sets CI) must carry the launcher it was tested with.
+        assert!(env::var_os("CI").is_none(), "{} no es el launcher de 2012 versión 13 (SHA-1 {MINECRAFT_EXE_SHA1})", source.display());
         println!("cargo:warning={} no es el launcher de 2012 conocido; puede que no funcione", source.display());
     }
     fs::write(out.join("Minecraft.exe"), &minecraft).expect("OUT_DIR");
@@ -101,6 +108,18 @@ fn files_under(dir: &Path, files: &mut Vec<PathBuf>) {
             files.push(path);
         }
     }
+}
+
+/// `v` in version.json, such as "0.1.0".
+fn version() -> String {
+    let text = fs::read_to_string("version.json").expect("leer version.json");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("version.json no es JSON");
+    let version = json["v"].as_str().expect("version.json necesita \"v\", como {\"v\": \"0.1.0\"}");
+    assert!(
+        !version.is_empty() && version.split('.').all(|n| n.parse::<u64>().is_ok()),
+        "la versión de version.json debe ser como 0.1.0, no \"{version}\""
+    );
+    version.to_string()
 }
 
 /// Writes `list` for `include!`: `&[(path relative to dir, include_bytes!(file)), ...]`.

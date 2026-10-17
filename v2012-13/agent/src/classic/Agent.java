@@ -63,6 +63,7 @@ public final class Agent {
             inst.addTransformer(new GameStart(server));
             NewsScroller.start(server);
             LauncherOptions.start(server);
+            UpdateCheck.start(server);
         } catch (Exception e) {
             log("ERROR: el agente no pudo iniciar; el launcher intentara usar los servidores originales.");
             e.printStackTrace(log);

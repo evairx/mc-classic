@@ -48,7 +48,7 @@ Sin marcar, cada opción usa lo de siempre. Las versiones de Fabric traen el car
 Fabric: los mods van en `instances\<perfil>\.minecraft\mods`.
 
 El login está en modo pruebas: acepta cualquier usuario válido (2 a 16 letras, cifras o `_`) con
-cualquier contraseña. El registro queda en `%APPDATA%\minecraft-launcher-classic\server\server.log`.
+cualquier contraseña. El registro queda en `%APPDATA%\mc-classic\2012-13\server\server.log`.
 
 ## Compilar
 
@@ -74,6 +74,34 @@ cargo dist
 que deja `target\release\Minecraft.exe` (unos 3 MB): optimizado para tamaño y sin símbolos. Lleva
 dentro el launcher original, el agente, la web de noticias, y un servidor y un cliente HTTPS.
 
+## Versiones y actualizaciones
+
+La versión de este launcher está en `version.json`:
+
+```json
+{
+    "v": "0.1.0"
+}
+```
+
+Cada carpeta de la raíz del repositorio es un launcher con su propio `version.json` y sus propias
+versiones. El trabajo se hace en ramas; `main` es producción:
+
+1. Al subir cambios a `main`, la Action `.github/workflows/release.yml` busca las carpetas cuya
+   versión todavía no tiene release, compila su `Minecraft.exe` en Windows y lo publica en
+   *Releases* con la etiqueta `<carpeta>-<versión>`, como `v2012-13-0.1.0`.
+2. Al abrirse, cada launcher lee su `version.json` de `main`. Si es más nueva y su release ya está
+   publicada, pregunta "Would you like to update now?". Con *Yes* descarga el exe nuevo, comprueba
+   su SHA-256, reemplaza al actual y se vuelve a abrir. Con *No* lo vuelve a preguntar la próxima
+   vez.
+
+Para publicar una versión nueva basta con subir el número en `version.json` (0.1.0, 0.1.1...) y
+llevar el cambio a `main`. Los builds de prueba (`cargo run`) no buscan actualizaciones.
+
+La Action necesita el `Minecraft.exe` original, que no está en el repositorio: en *Settings →
+Secrets and variables → Actions*, crea el secreto `MINECRAFT_EXE_URL` con una URL desde la que
+descargarlo. El build se detiene si no es el de 2012 versión 13.
+
 ## Estructura
 
 | Carpeta | Contenido |
@@ -82,3 +110,4 @@ dentro el launcher original, el agente, la web de noticias, y un servidor y un c
 | `agent/` | El agente Java que se carga en el launcher. |
 | `bridge/` | El applet que abre las versiones que el launcher no puede ejecutar dentro. |
 | `assets/` | La web de noticias y sus imágenes, que van dentro del exe. |
+| `version.json` | La versión de este launcher. |

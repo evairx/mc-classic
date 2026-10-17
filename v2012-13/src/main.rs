@@ -33,6 +33,7 @@ mod mojang;
 mod news;
 mod profiles;
 mod runtime;
+mod updater;
 mod versions;
 
 use std::{
@@ -118,6 +119,10 @@ struct App {
     prepared: AsyncMutex<Option<(String, Arc<Prepare>)>>,
     /// The version selector's list, fetched once it is fetched without error.
     versions: OnceCell<String>,
+    /// A newer release of this launcher, looked for once.
+    newer: OnceCell<Option<updater::Release>>,
+    /// The release the player chose to update to, installed once the launcher closes.
+    update: Mutex<Option<updater::Release>>,
     bridge: Arc<bridge::Bridge>,
 }
 
@@ -175,6 +180,34 @@ impl App {
             .await
     }
 
+    /// A newer release of this launcher, if there is one. Test builds (`cargo run`) do not look.
+    async fn newer(&self) -> Option<&updater::Release> {
+        if cfg!(debug_assertions) {
+            return None;
+        }
+        self.newer
+            .get_or_init(|| async {
+                match tokio::task::spawn_blocking(updater::newer).await {
+                    Ok(Ok(newer)) => {
+                        if let Some(release) = &newer {
+                            log!("Hay una versión nueva: {} (esta es {}).", release.version, updater::CURRENT);
+                        }
+                        newer
+                    }
+                    Ok(Err(e)) => {
+                        log!("No se pudo buscar actualizaciones: {e}");
+                        None
+                    }
+                    Err(e) => {
+                        log!("No se pudo buscar actualizaciones: {e}");
+                        None
+                    }
+                }
+            })
+            .await
+            .as_ref()
+    }
+
     /// Prepares the selected version in the background, so it is ready by the time of login.
     fn prepare_soon(self: &Arc<Self>) {
         let app = self.clone();
@@ -207,6 +240,8 @@ fn run() -> Result<()> {
     let server = home.join("server");
     fs::create_dir_all(&server)?;
     let _ = LOG.set(Mutex::new(fs::File::create(server.join("server.log"))?));
+    log!("Minecraft Launcher Classic {} ({}).", updater::CURRENT, if cfg!(debug_assertions) { "build de prueba" } else { "release" });
+    updater::clean_up();
     if moved {
         log!("Datos movidos de minecraft-launcher-classic a {}", home.display());
     }
@@ -229,12 +264,23 @@ fn run() -> Result<()> {
         dirs,
         prepared: AsyncMutex::new(None),
         versions: OnceCell::new(),
+        newer: OnceCell::new(),
+        update: Mutex::new(None),
         bridge: Arc::default(),
     });
     // The launcher understands `-u=<user>`, `-p=<password>` and `--noupdate`.
     let launcher_args: Vec<OsString> = env::args_os().skip(1).collect();
-    tokio::runtime::Runtime::new()?.block_on(serve(app, launcher_args))?;
+    // The runtime ends with this line, and the port is free again for an updated copy.
+    tokio::runtime::Runtime::new()?.block_on(serve(app.clone(), launcher_args))?;
     log!("Launcher cerrado.");
+    let update = app.update.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some(release) = update {
+        if let Err(e) = updater::install(&release) {
+            log!("ERROR al actualizar: {e}");
+            error_box(&e.to_string());
+        }
+        updater::restart()?;
+    }
     Ok(())
 }
 
@@ -310,12 +356,13 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
     })?;
 
     // Prepare the version now, while Java downloads or the player types their login, and fetch
-    // the version list for the options window.
+    // the version list for the options window and any update.
     app.prepare_soon();
     tokio::spawn({
         let app = app.clone();
         async move {
             let _ = app.version_list().await;
+            let _ = app.newer().await;
         }
     });
     let router = Router::new()
@@ -325,6 +372,7 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
         .route("/classic/profiles", get(get_profiles).post(set_profiles))
         .route("/classic/versions", get(version_list))
         .route("/classic/started", post(started))
+        .route("/classic/update", get(update_offer).post(update_accepted))
         .route("/mcupdate.tumblr.com/", get(news::first_page))
         .route("/mcupdate.tumblr.com/page/{page}", get(news::more))
         .route("/mcupdate.tumblr.com/{*path}", get(news::file))
@@ -553,6 +601,25 @@ async fn version_list(State(app): State<Arc<App>>) -> (StatusCode, String) {
             (StatusCode::SERVICE_UNAVAILABLE, e)
         }
     }
+}
+
+/// `<this version>\t<newer version>` when a newer release is out, for the agent to offer it;
+/// empty otherwise.
+async fn update_offer(State(app): State<Arc<App>>) -> String {
+    match app.newer().await {
+        Some(release) => format!("{}\t{}", updater::CURRENT, release.version),
+        None => String::new(),
+    }
+}
+
+/// The player chose to update: it happens once the agent closes the launcher.
+async fn update_accepted(State(app): State<Arc<App>>) -> (StatusCode, &'static str) {
+    let Some(release) = app.newer().await.cloned() else {
+        return (StatusCode::NOT_FOUND, "no hay actualización");
+    };
+    log!("Actualización a {} aceptada.", release.version);
+    *app.update.lock().unwrap_or_else(PoisonError::into_inner) = Some(release);
+    (StatusCode::OK, "ok")
 }
 
 /// The agent saw the game start inside the launcher: it needs nothing more from this program.

@@ -1,0 +1,92 @@
+name: Release
+
+# main is production. Each folder at the root with a version.json is a launcher with its own
+# versions: when main has a version that has no release yet, it is built on Windows and published
+# as <folder>-<version>, such as v2012-13-0.1.0, with its Minecraft.exe and that file's SHA-256.
+# Work happens on other branches; merging into main with a new version in version.json releases
+# it, and the launchers out there, which read their version.json on main, offer the update.
+#
+# The build needs Mojang's original launcher, which is not in the repository: the secret
+# MINECRAFT_EXE_URL says where to download it from.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      launchers: ${{ steps.find.outputs.launchers }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          launchers='[]'
+          for file in */version.json; do
+            [ -f "$file" ] || continue
+            dir="${file%/version.json}"
+            version="$(jq -r .v "$file")"
+            tag="$dir-$version"
+            if gh release view "$tag" > /dev/null 2>&1; then
+              echo "$tag ya está publicado"
+            else
+              echo "$tag se publicará"
+              launchers="$(jq -c --arg dir "$dir" --arg version "$version" --arg tag "$tag" \
+                '. + [{dir: $dir, version: $version, tag: $tag}]' <<< "$launchers")"
+            fi
+          done
+          echo "launchers=$launchers" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.launchers != '[]'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        launcher: ${{ fromJSON(needs.plan.outputs.launchers) }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.launcher.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.launcher.dir }}
+      - name: Original Minecraft.exe
+        env:
+          MINECRAFT_EXE_URL: ${{ secrets.MINECRAFT_EXE_URL }}
+        run: |
+          if [ -z "$MINECRAFT_EXE_URL" ]; then
+            echo "::error::Falta el secreto MINECRAFT_EXE_URL: la URL del Minecraft.exe original de 2012."
+            exit 1
+          fi
+          curl -fsSL -o Minecraft.exe "$MINECRAFT_EXE_URL"
+      - name: Build
+        run: cargo dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The launchers check Minecraft.exe.sha256 before offering the update, and the download after.
+        run: |
+          sha256sum target/release/Minecraft.exe | cut -d' ' -f1 > target/release/Minecraft.exe.sha256
+          gh release create "${{ matrix.launcher.tag }}" target/release/Minecraft.exe target/release/Minecraft.exe.sha256 \
+            --target "${{ github.sha }}" \
+            --title "${{ matrix.launcher.dir }} ${{ matrix.launcher.version }}" \
+            --notes "${{ matrix.launcher.dir }}, versión ${{ matrix.launcher.version }}, desde ${{ github.sha }}."

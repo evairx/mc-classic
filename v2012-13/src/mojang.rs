@@ -41,6 +41,23 @@ fn get(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Downloads a file, reporting the bytes received and the total, when the server sends it.
+pub fn get_with_progress(url: &str, report: &dyn Fn(u64, u64)) -> Result<Vec<u8>> {
+    let response = agent().get(url).call()?;
+    let total = response.header("Content-Length").and_then(|n| n.parse().ok()).unwrap_or(0);
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        report(bytes.len() as u64, total);
+    }
+}
+
 pub fn get_text(url: &str) -> Result<String> {
     Ok(String::from_utf8(get(url)?)?)
 }
