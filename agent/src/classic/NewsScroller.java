@@ -23,7 +23,7 @@ import javax.swing.text.html.HTMLDocument;
  * HTML and runs no JavaScript, so this does what a script would: it watches the pane's scroll
  * bar and, near the bottom, appends the next page of posts from the local server
  * ({@code <server>/mcupdate.tumblr.com/page/<n>}) to the element with id {@code posts}, until a
- * page comes back empty. It also fixes the sidebar in place ({@link NewsSidebar}).
+ * page comes back empty.
  */
 final class NewsScroller implements ChangeListener {
     /** URL path of the news page; the launcher asks for http://mcupdate.tumblr.com/. */
@@ -104,7 +104,6 @@ final class NewsScroller implements ChangeListener {
             scroller.scroll.addChangeListener(scroller);
             Agent.log("Noticias: scroll infinito activo.");
             scroller.stateChanged(null);
-            NewsSidebar.show(scrollPane, pane, document, server + NEWS + "sidebar");
             return true;
         }
         return false;

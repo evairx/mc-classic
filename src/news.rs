@@ -1,11 +1,9 @@
 //! The launcher's news pane: the web in `assets/`, served from this exe. `index.html` is the
 //! first page and `2.html`, `3.html`... the older ones, as on the Tumblr it stands in for. The
-//! pane is a Swing `JEditorPane`, which renders simple HTML and runs no JavaScript, so the agent
-//! (`NewsScroller.java`, `NewsSidebar.java`) does what a script would:
-//! - infinite scroll: near the bottom it appends `page/<n>`, the posts of `<n>.html` alone, so
-//!   the "Minecraft News" title shows only once, until a page comes back empty;
-//! - a fixed sidebar: it shows `sidebar`, the sidebar of `index.html`, in a pane of its own beside
-//!   the posts, and takes it out of the page.
+//! pane is a Swing `JEditorPane`, which renders simple HTML and runs no JavaScript, so the
+//! infinite scroll lives in the agent (`NewsScroller.java`): near the bottom it appends
+//! `page/<n>`, the posts of `<n>.html` alone, until a page comes back empty. The title and the
+//! sidebar of `index.html` show only once, at the top.
 //!
 //! The posts are the `<div class="post ...">` blocks of a page. Whatever lies between them (the
 //! spacers) is dropped and put back between the posts each page adds.
@@ -41,16 +39,6 @@ pub async fn more(Path(page): Path<usize>) -> Response {
     let posts = text(&format!("{page}.html")).map(posts).unwrap_or_default();
     log!("GET noticias, página {page}: {} posts", posts.len());
     html(posts.iter().map(|post| format!("{SPACER}{post}")).collect())
-}
-
-/// The sidebar of `index.html` as a page of its own, with the same styles.
-pub async fn sidebar() -> Response {
-    let Some(page) = text(FIRST_PAGE) else { return not_found(FIRST_PAGE) };
-    let cell = page.find("class=\"sidebar\"").and_then(|at| page[..at].rfind("<td"));
-    let (Some(start), Some(body)) = (cell, page.find("<body")) else { return not_found("la barra lateral") };
-    let Some(end) = block_end(page, start, "td") else { return not_found("la barra lateral") };
-    let head = &page[..page[body..].find('>').map_or(page.len(), |i| body + i + 1)];
-    html(format!("{head}\n  <table width=\"100%\"><tbody><tr>{}</tr></tbody></table>\n</body>\n</html>\n", &page[start..end]))
 }
 
 /// Any other file of `assets/`, such as `assets/bg_main.png`.
