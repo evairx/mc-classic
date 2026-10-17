@@ -36,6 +36,10 @@ pub struct Profile {
     /// A `javaw.exe` of the player's; empty means the one Mojang publishes for the version.
     #[serde(default)]
     pub java: String,
+    /// The kinds of version the selector shows besides releases, comma-separated: `snapshot`,
+    /// `old_beta`, `old_alpha`, `fabric`.
+    #[serde(default)]
+    pub shown: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +62,7 @@ impl Default for Profiles {
                 game_flags: String::new(),
                 resolution: String::new(),
                 java: String::new(),
+                shown: String::new(),
             }],
         }
     }
@@ -118,13 +123,14 @@ impl Profiles {
         for p in &self.profiles {
             let folder = instances.join(p.folder());
             text += &format!(
-                "profile\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "profile\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 p.name,
                 p.username,
                 p.version,
                 p.game_flags,
                 p.resolution,
                 p.java,
+                p.shown,
                 folder.display()
             );
         }
@@ -139,13 +145,14 @@ impl Profiles {
             match fields.as_slice() {
                 ["launcher", flags, ..] => profiles.launcher_flags = flags.to_string(),
                 ["selected", name, ..] => profiles.selected = name.to_string(),
-                ["profile", name, username, version, flags, resolution, java, ..] => profiles.profiles.push(Profile {
+                ["profile", name, username, version, flags, resolution, java, shown, ..] => profiles.profiles.push(Profile {
                     name: name.to_string(),
                     username: username.to_string(),
                     version: version.to_string(),
                     game_flags: flags.to_string(),
                     resolution: resolution.to_string(),
                     java: java.to_string(),
+                    shown: shown.to_string(),
                 }),
                 _ => {}
             }

@@ -11,8 +11,9 @@ use crate::{mojang, Result};
 const FABRIC_META: &str = "https://meta.fabricmc.net/v2/versions";
 const FABRIC: &str = "fabric:";
 
-/// One line per version, `<spec>\t<label>\t<type>`, for the version selector, which filters by
-/// type: `latest`, `release`, `snapshot`, `old_beta`, `old_alpha` or `fabric`.
+/// One line per version, `<spec>\t<label>\t<type>`, newest first as Mojang lists them, each
+/// release followed by its Fabric version. The selector filters by type: `latest`, `release`,
+/// `snapshot`, `old_beta`, `old_alpha` or `fabric`.
 pub fn list() -> Result<String> {
     let manifest = mojang::manifest()?;
     let latest = |kind: &str| manifest["latest"][kind].as_str().unwrap_or_default().to_string();
@@ -21,23 +22,31 @@ pub fn list() -> Result<String> {
         latest("release"),
         latest("snapshot")
     );
-    let versions = manifest["versions"].as_array().ok_or("la lista de versiones no trae versions")?;
-    let of_type = |kind: &'static str| versions.iter().filter(move |v| v["type"] == kind).filter_map(|v| v["id"].as_str());
-    for id in of_type("release") {
-        text += &format!("{id}\t{id}\trelease\n");
-    }
-    // Fabric lists every version it supports; the stable ones are the releases.
-    match mojang::get_json(&format!("{FABRIC_META}/game")) {
-        Ok(fabric) => {
-            for id in fabric.as_array().into_iter().flatten().filter(|v| v["stable"] == true).filter_map(|v| v["version"].as_str()) {
-                text += &format!("{FABRIC}{id}\tFabric {id}\tfabric\n");
-            }
+    // Fabric lists every version it supports; the stable ones are releases.
+    let fabric: Vec<String> = match mojang::get_json(&format!("{FABRIC_META}/game")) {
+        Ok(list) => list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|v| v["stable"] == true)
+            .filter_map(|v| v["version"].as_str().map(String::from))
+            .collect(),
+        Err(e) => {
+            log!("Sin versiones de Fabric: {e}");
+            Vec::new()
         }
-        Err(e) => log!("Sin versiones de Fabric: {e}"),
-    }
-    for (kind, label) in [("snapshot", "snapshot"), ("old_beta", "beta"), ("old_alpha", "alpha")] {
-        for id in of_type(kind) {
-            text += &format!("{id}\t{id} ({label})\t{kind}\n");
+    };
+    for version in manifest["versions"].as_array().ok_or("la lista de versiones no trae versions")? {
+        let (Some(id), Some(kind)) = (version["id"].as_str(), version["type"].as_str()) else { continue };
+        let label = match kind {
+            "snapshot" => format!("{id} (snapshot)"),
+            "old_beta" => format!("{id} (beta)"),
+            "old_alpha" => format!("{id} (alpha)"),
+            _ => id.to_string(),
+        };
+        text += &format!("{id}\t{label}\t{kind}\n");
+        if kind == "release" && fabric.iter().any(|f| f == id) {
+            text += &format!("{FABRIC}{id}\tFabric {id}\tfabric\n");
         }
     }
     Ok(text)

@@ -7,6 +7,9 @@
 //! - that exe's own icon, so this one looks the same in Explorer and the taskbar, and a manifest
 //!   for the Windows 10 dialogs (common controls 6, which the progress dialog needs);
 //! - every file in `assets/`, the web the launcher shows as its news (`src/news.rs`).
+//!
+//! `cargo dist` (`.cargo/config.toml`) builds the exe to hand out, with the release profile of
+//! Cargo.toml: optimized for size, stripped.
 
 use std::{
     env, fs,
@@ -43,6 +46,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MINECRAFT_EXE");
     println!("cargo:rerun-if-env-changed=JAVA_HOME");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    if env::var("PROFILE").is_ok_and(|profile| profile == "debug") {
+        println!("cargo:warning=Build de prueba, sin optimizar. El Minecraft.exe para repartir se hace con `cargo dist`: target\\release\\Minecraft.exe");
+    }
 
     build_jar(Path::new("agent/src"), &out.join("agent-classes"), &out.join("classic-agent.jar"), Some("agent/MANIFEST.MF"));
     build_jar(Path::new("bridge/src"), &out.join("bridge-classes"), &out.join("bridge.jar"), None);

@@ -164,6 +164,17 @@ impl App {
         result
     }
 
+    /// The version list, fetched the first time it is fetched without error.
+    async fn version_list(&self) -> std::result::Result<&String, String> {
+        self.versions
+            .get_or_try_init(|| async {
+                tokio::task::spawn_blocking(|| versions::list().map_err(|e| e.to_string()))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+            })
+            .await
+    }
+
     /// Prepares the selected version in the background, so it is ready by the time of login.
     fn prepare_soon(self: &Arc<Self>) {
         let app = self.clone();
@@ -174,7 +185,11 @@ impl App {
 }
 
 fn main() {
-    std::panic::set_hook(Box::new(|info| log!("PANIC: {info}")));
+    // The release build aborts on a panic, so this is the one chance to tell the player.
+    std::panic::set_hook(Box::new(|info| {
+        log!("PANIC: {info}");
+        error_box(&format!("Error interno de Minecraft Launcher Classic.\n\n{info}"));
+    }));
     if let Err(e) = run() {
         log!("ERROR: {e}");
         error_box(&e.to_string());
@@ -294,8 +309,15 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
         format!("Minecraft Launcher Classic ya está abierto, o algo más usa el puerto {PORT}.\n\n{e}")
     })?;
 
-    // Prepare the version now, while Java downloads or the player types their login.
+    // Prepare the version now, while Java downloads or the player types their login, and fetch
+    // the version list for the options window.
     app.prepare_soon();
+    tokio::spawn({
+        let app = app.clone();
+        async move {
+            let _ = app.version_list().await;
+        }
+    });
     let router = Router::new()
         .route("/login.minecraft.net/", post(login))
         .route("/classic/play", post(play))
@@ -522,21 +544,13 @@ async fn set_profiles(State(app): State<Arc<App>>, body: String) -> (StatusCode,
     (StatusCode::OK, "ok".to_string())
 }
 
-/// Every version a profile can pick, one `<spec>\t<label>` line each.
+/// Every version a profile can pick (see `versions::list`).
 async fn version_list(State(app): State<Arc<App>>) -> (StatusCode, String) {
-    let list = app
-        .versions
-        .get_or_try_init(|| async {
-            tokio::task::spawn_blocking(|| versions::list().map_err(|e| e.to_string()))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
-        })
-        .await;
-    match list {
+    match app.version_list().await {
         Ok(text) => (StatusCode::OK, text.clone()),
         Err(e) => {
             log!("Sin lista de versiones: {e}");
-            (StatusCode::SERVICE_UNAVAILABLE, e.clone())
+            (StatusCode::SERVICE_UNAVAILABLE, e)
         }
     }
 }

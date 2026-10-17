@@ -41,8 +41,8 @@ No hay que instalar Java: se descarga solo la primera vez, de los servidores de 
 | Sección | Opción |
 |---|---|
 | Profile Info | Perfil (*New*, *Delete*), nombre, usuario (rellena el login) y resolución de la ventana del juego. |
-| Version Selection | *Use version*: por defecto la última versión publicada (*Latest release*). Las casillas muestran también snapshots, Beta, Alpha y versiones con mods (Fabric). |
-| Java Settings | *Executable* (un Java propio), *JVM Arguments* del juego (memoria, como `-Xmx4G`) y *Launcher JVM Arguments*, que se aplican al volver a abrir el launcher. |
+| Version Selection | *Use version*: por defecto la última versión publicada (*Latest release*). Las casillas, que se guardan con el perfil, muestran también snapshots, Beta, Alpha y versiones con mods (Fabric). |
+| Java Settings | *Executable* (un Java propio: al marcarla se elige el `javaw.exe`), *JVM Arguments* del juego (memoria, como `-Xmx4G`) y *Launcher JVM Arguments*, que se aplican al volver a abrir el launcher. |
 
 Sin marcar, cada opción usa lo de siempre. Las versiones de Fabric traen el cargador de mods
 Fabric: los mods van en `instances\<perfil>\.minecraft\mods`.
@@ -64,8 +64,15 @@ cd v2012-13
 cargo run
 ```
 
-Para repartirlo, `cargo build --release` deja `target\release\Minecraft.exe` (unos 3,5 MB):
-lleva dentro el launcher original, el agente, la web de noticias, y un servidor y un cliente HTTPS.
+`cargo run` hace un build de prueba, sin optimizar y mucho más grande. El exe para repartir se hace
+con:
+
+```
+cargo dist
+```
+
+que deja `target\release\Minecraft.exe` (unos 3 MB): optimizado para tamaño y sin símbolos. Lleva
+dentro el launcher original, el agente, la web de noticias, y un servidor y un cliente HTTPS.
 
 ## Estructura
 

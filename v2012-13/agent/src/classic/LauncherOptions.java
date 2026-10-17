@@ -30,10 +30,13 @@ import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JFileChooser;
 import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.filechooser.FileNameExtensionFilter;
 
 /**
  * The launcher's options window, as a profile editor in the style of Mojang's 2013 launcher:
@@ -49,7 +52,7 @@ final class LauncherOptions implements AWTEventListener {
     private static final String LOGIN_FORM = "net.minecraft.LoginForm";
     /** What the window shows as the game directory; "Open Game Dir" opens the real folder. */
     private static final String LOCATION = "%APPDATA%/Roaming/mc-classic/2012-13/instances";
-    private static final String AUTOMATIC_JAVA = "Automatic: the Java Mojang publishes for the version";
+    private static final String AUTOMATIC_JAVA = "Automatic (Mojang's Java)";
     private static final long FIND_MILLIS = 500;
     private static final long GIVE_UP_MILLIS = 120000;
 
@@ -188,7 +191,7 @@ final class LauncherOptions implements AWTEventListener {
             row(info, resolutionBox, resolutionRow());
 
             JPanel versionPanel = section("Version Selection");
-            for (JCheckBox filter : new JCheckBox[] { snapshots, betas, alphas, modded }) {
+            for (JCheckBox filter : filters()) {
                 wide(versionPanel, filter);
                 filter.addActionListener(new ActionListener() {
                     public void actionPerformed(ActionEvent event) {
@@ -397,6 +400,9 @@ final class LauncherOptions implements AWTEventListener {
             heightField.setEnabled(sized);
             java.set(profile.java);
             gameFlags.set(profile.gameFlags);
+            for (JCheckBox filter : filters()) {
+                filter.setSelected(profile.shown.contains(type(filter)));
+            }
             selectVersion(profile.version);
         }
 
@@ -413,6 +419,13 @@ final class LauncherOptions implements AWTEventListener {
                     ? clean(widthField.getText()) + "x" + clean(heightField.getText()) : "";
             current.java = java.get();
             current.gameFlags = gameFlags.get();
+            StringBuilder shown = new StringBuilder();
+            for (JCheckBox filter : filters()) {
+                if (filter.isSelected()) {
+                    shown.append(shown.length() > 0 ? "," : "").append(type(filter));
+                }
+            }
+            current.shown = shown.toString();
             Version version = (Version) versionBox.getSelectedItem();
             if (version != null) {
                 current.version = version.spec;
@@ -440,15 +453,20 @@ final class LauncherOptions implements AWTEventListener {
             versionBox.setSelectedItem(found);
         }
 
+        private JCheckBox[] filters() {
+            return new JCheckBox[] { snapshots, betas, alphas, modded };
+        }
+
+        /** The kind of version a checkbox shows, as the server names it. */
+        private String type(JCheckBox filter) {
+            return filter == snapshots ? "snapshot" : filter == betas ? "old_beta" : filter == alphas ? "old_alpha" : "fabric";
+        }
+
         private JCheckBox filter(String type) {
-            if (type.equals("snapshot")) {
-                return snapshots;
-            } else if (type.equals("old_beta")) {
-                return betas;
-            } else if (type.equals("old_alpha")) {
-                return alphas;
-            } else if (type.equals("fabric")) {
-                return modded;
+            for (JCheckBox filter : filters()) {
+                if (type(filter).equals(type)) {
+                    return filter;
+                }
             }
             return null;
         }
@@ -528,13 +546,16 @@ final class LauncherOptions implements AWTEventListener {
         final JCheckBox box;
         final JTextField field = new JTextField(30);
         private final String fallback;
-        /** Whether the fallback is a description rather than a value to start editing from. */
-        private final boolean described;
+        /**
+         * Whether the setting is a file to pick: ticking it asks for one, and the fallback is a
+         * description rather than a value to start editing from.
+         */
+        private final boolean file;
 
-        Toggle(String label, String fallback, boolean described) {
+        Toggle(String label, String fallback, boolean file) {
             this.box = new JCheckBox(label);
             this.fallback = fallback;
-            this.described = described;
+            this.file = file;
             box.addActionListener(new ActionListener() {
                 public void actionPerformed(ActionEvent event) {
                     changed();
@@ -543,13 +564,31 @@ final class LauncherOptions implements AWTEventListener {
         }
 
         private void changed() {
+            if (box.isSelected() && file && !choose()) {
+                box.setSelected(false);
+            }
             field.setEnabled(box.isSelected());
             if (!box.isSelected()) {
                 field.setText(fallback);
-            } else if (described && field.getText().equals(fallback)) {
-                field.setText("");
             }
             field.setCaretPosition(0);
+        }
+
+        /** Asks for the file, starting where Java usually is. Returns whether one was picked. */
+        private boolean choose() {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setDialogTitle("Select javaw.exe");
+            chooser.setFileFilter(new FileNameExtensionFilter("Java (javaw.exe, java.exe)", "exe"));
+            String home = System.getenv("JAVA_HOME");
+            File start = new File(home != null ? home + "\\bin" : "C:\\Program Files\\Java");
+            if (start.isDirectory()) {
+                chooser.setCurrentDirectory(start);
+            }
+            if (chooser.showOpenDialog(SwingUtilities.getWindowAncestor(box)) != JFileChooser.APPROVE_OPTION) {
+                return false;
+            }
+            field.setText(chooser.getSelectedFile().getAbsolutePath());
+            return true;
         }
 
         void addTo(JPanel panel) {
@@ -590,6 +629,8 @@ final class LauncherOptions implements AWTEventListener {
         /** {@code <width>x<height>}, or empty. */
         String resolution;
         String java;
+        /** Kinds of version shown besides releases, such as "snapshot,fabric". */
+        String shown;
         /** Its folder in instances, as the server names it. */
         String folder;
 
@@ -601,6 +642,7 @@ final class LauncherOptions implements AWTEventListener {
             copy.gameFlags = gameFlags;
             copy.resolution = resolution;
             copy.java = java;
+            copy.shown = shown;
             copy.folder = "";
             return copy;
         }
@@ -649,7 +691,7 @@ final class LauncherOptions implements AWTEventListener {
                     profiles.instances = fields[1];
                 } else if (fields[0].equals("selected") && fields.length > 1) {
                     profiles.selected = fields[1];
-                } else if (fields[0].equals("profile") && fields.length > 7) {
+                } else if (fields[0].equals("profile") && fields.length > 8) {
                     Profile profile = new Profile();
                     profile.name = fields[1];
                     profile.username = fields[2];
@@ -657,7 +699,8 @@ final class LauncherOptions implements AWTEventListener {
                     profile.gameFlags = fields[4];
                     profile.resolution = fields[5];
                     profile.java = fields[6];
-                    profile.folder = fields[7];
+                    profile.shown = fields[7];
+                    profile.folder = fields[8];
                     profiles.list.add(profile);
                 }
             }
@@ -688,7 +731,8 @@ final class LauncherOptions implements AWTEventListener {
             for (Profile p : list) {
                 text.append("profile\t").append(p.name).append('\t').append(p.username).append('\t')
                         .append(p.version).append('\t').append(p.gameFlags).append('\t').append(p.resolution)
-                        .append('\t').append(p.java).append('\t').append(p.folder).append('\n');
+                        .append('\t').append(p.java).append('\t').append(p.shown).append('\t').append(p.folder)
+                        .append('\n');
             }
             return text.toString();
         }

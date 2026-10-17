@@ -1,0 +1,3 @@
+[alias]
+# The Minecraft.exe to hand out: target\release\Minecraft.exe.
+dist = "build --release"
