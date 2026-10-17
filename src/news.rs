@@ -1,13 +1,13 @@
 //! The launcher's news pane, made from `assets/`: `news.html` and the files it links to, such as
-//! the images in `assets/assets/`. The pane is a Swing `JEditorPane`, which renders simple HTML
-//! and runs no JavaScript, so the infinite scroll lives in the agent (`NewsScroller.java`): the
-//! first page holds the newest posts, and the agent appends `page/<n>` as the player nears the
-//! bottom, until a page comes back empty.
+//! the images in `assets/assets/`, all served from this exe. The pane is a Swing `JEditorPane`,
+//! which renders simple HTML and runs no JavaScript, so the infinite scroll lives in the agent
+//! (`NewsScroller.java`): the first page holds the newest posts, and the agent appends
+//! `page/<n>` as the player nears the bottom, until a page comes back empty.
 //!
 //! The posts are the `<div class="post ...">` blocks of `news.html`, newest first. Whatever lies
 //! between them (the spacers) is dropped and put back between the posts each page holds.
 
-use std::sync::OnceLock;
+use std::{path::Path as FilePath, sync::OnceLock};
 
 use axum::{
     extract::Path,
@@ -15,10 +15,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-/// The launcher asks for `http://mcupdate.tumblr.com/`; its files live in `www/<DIR>`.
-pub const DIR: &str = "mcupdate.tumblr.com";
 /// Every file under `assets/`, as (path relative to it, contents). See build.rs.
-pub const FILES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/assets.rs"));
+const FILES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 
 const PAGE: &str = include_str!("../assets/news.html");
 /// Posts per page.
@@ -57,6 +55,16 @@ pub async fn more(Path(page): Path<usize>) -> Response {
     let body: String = posts.map(|post| format!("{SPACER}{post}")).collect();
     log!("GET noticias, página {page}: {} bytes", body.len());
     html(body)
+}
+
+/// Any other file of `assets/`, such as `assets/bg_main.png`.
+pub async fn file(Path(path): Path<String>) -> Response {
+    let Some((name, bytes)) = FILES.iter().find(|(name, _)| *name == path) else {
+        log!("GET 404 /mcupdate.tumblr.com/{path} (no está en assets/)");
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    log!("GET 200 /mcupdate.tumblr.com/{path} ({} bytes)", bytes.len());
+    ([(header::CONTENT_TYPE, crate::content_type(FilePath::new(name)))], *bytes).into_response()
 }
 
 fn html(body: String) -> Response {

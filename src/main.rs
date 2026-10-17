@@ -15,8 +15,8 @@
 //!
 //! The version is 1.7.2 unless the command line says otherwise: `Minecraft.exe -version 1.21`.
 //! Static files live in `server/www/<host>/<path>`, so the tree reads like a mirror of the 2012
-//! servers; the news come from `assets/` (`news.rs`). There is no console: messages go to
-//! `server/server.log`, errors to a dialog box.
+//! servers; the news are `assets/`, served from this exe (`news.rs`). There is no console:
+//! messages go to `server/server.log`, errors to a dialog box.
 
 #![windows_subsystem = "windows"]
 
@@ -171,9 +171,6 @@ fn run() -> Result<()> {
 
     install(&dirs.home.join("Minecraft.exe"), MINECRAFT_EXE)?;
     install(&dirs.server.join("classic-agent.jar"), AGENT_JAR)?;
-    for (name, bytes) in news::FILES {
-        install(&mojang::under(&dirs.www.join(news::DIR), name)?, bytes)?;
-    }
 
     let app = Arc::new(App {
         dirs,
@@ -280,6 +277,7 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
         .route("/classic/status", get(status))
         .route("/mcupdate.tumblr.com/", get(news::first_page))
         .route("/mcupdate.tumblr.com/page/{page}", get(news::more))
+        .route("/mcupdate.tumblr.com/{*path}", get(news::file))
         .fallback(static_file)
         .with_state(app.clone());
 
@@ -505,7 +503,7 @@ fn resolve(www: &Path, url_path: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-fn content_type(path: &Path) -> &'static str {
+pub fn content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("html" | "htm") => "text/html; charset=utf-8",
         Some("jar") => "application/java-archive",

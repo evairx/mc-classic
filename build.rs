@@ -106,12 +106,6 @@ fn embed_assets(dir: &Path, list: &Path) {
     let mut code = String::from("&[\n");
     for file in files {
         let name = file.strip_prefix(dir).expect("dentro de assets").to_string_lossy().replace('\\', "/");
-        // The local server serves only these names (`resolve` in main.rs).
-        let plain = name.split('/').all(|s| !s.starts_with('.') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
-        if !plain {
-            println!("cargo:warning=assets/{name} se omite: usa solo letras, cifras, '.', '_' y '-', sin '.' al inicio");
-            continue;
-        }
         code += &format!("    ({name:?}, include_bytes!({:?})),\n", root.join(&file).display().to_string());
     }
     code.push(']');
