@@ -5,7 +5,8 @@
 //! - the original 2012 `Minecraft.exe` (project root, or the `MINECRAFT_EXE` variable), copied as
 //!   is. It is Mojang's file, so it is not in the repository;
 //! - that exe's own icon, so this one looks the same in Explorer and the taskbar, and a manifest
-//!   for the Windows 10 dialogs (common controls 6, which the progress dialog needs).
+//!   for the Windows 10 dialogs (common controls 6, which the progress dialog needs);
+//! - every file in `assets/`, the web the launcher shows as its news (`src/news.rs`).
 
 use std::{
     env, fs,
@@ -36,6 +37,7 @@ const APP_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="y
 
 fn main() {
     println!("cargo:rerun-if-changed=agent");
+    println!("cargo:rerun-if-changed=assets");
     println!("cargo:rerun-if-changed=bridge");
     println!("cargo:rerun-if-changed=Minecraft.exe");
     println!("cargo:rerun-if-env-changed=MINECRAFT_EXE");
@@ -44,6 +46,7 @@ fn main() {
 
     build_jar(Path::new("agent/src"), &out.join("agent-classes"), &out.join("classic-agent.jar"), Some("agent/MANIFEST.MF"));
     build_jar(Path::new("bridge/src"), &out.join("bridge-classes"), &out.join("bridge.jar"), None);
+    embed_assets(Path::new("assets"), &out.join("assets.rs"));
 
     let source = env::var_os("MINECRAFT_EXE").map_or_else(|| PathBuf::from("Minecraft.exe"), PathBuf::from);
     let minecraft = fs::read(&source).unwrap_or_else(|e| {
@@ -69,7 +72,8 @@ fn main() {
 fn build_jar(sources: &Path, classes: &Path, jar: &Path, manifest: Option<&str>) {
     let _ = fs::remove_dir_all(classes);
     let mut files = Vec::new();
-    java_files(sources, &mut files);
+    files_under(sources, &mut files);
+    files.retain(|path| path.extension().is_some_and(|ext| ext == "java"));
     run(Command::new(jdk_tool("javac"))
         .args(["--release", "8", "-Xlint:-options", "-encoding", "UTF-8", "-d"])
         .arg(classes)
@@ -82,15 +86,36 @@ fn build_jar(sources: &Path, classes: &Path, jar: &Path, manifest: Option<&str>)
     run(command.arg("-C").arg(classes).arg("."));
 }
 
-fn java_files(dir: &Path, files: &mut Vec<PathBuf>) {
+fn files_under(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-        let path = entry.expect("leer el directorio de fuentes").path();
+        let path = entry.expect("leer el directorio").path();
         if path.is_dir() {
-            java_files(&path, files);
-        } else if path.extension().is_some_and(|ext| ext == "java") {
+            files_under(&path, files);
+        } else {
             files.push(path);
         }
     }
+}
+
+/// Writes `list` for `include!`: `&[(path relative to dir, include_bytes!(file)), ...]`.
+fn embed_assets(dir: &Path, list: &Path) {
+    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    files_under(dir, &mut files);
+    files.sort();
+    let mut code = String::from("&[\n");
+    for file in files {
+        let name = file.strip_prefix(dir).expect("dentro de assets").to_string_lossy().replace('\\', "/");
+        // The local server serves only these names (`resolve` in main.rs).
+        let plain = name.split('/').all(|s| !s.starts_with('.') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+        if !plain {
+            println!("cargo:warning=assets/{name} se omite: usa solo letras, cifras, '.', '_' y '-', sin '.' al inicio");
+            continue;
+        }
+        code += &format!("    ({name:?}, include_bytes!({:?})),\n", root.join(&file).display().to_string());
+    }
+    code.push(']');
+    fs::write(list, code).expect("OUT_DIR");
 }
 
 /// The first icon group of the exe, as an .ico file.

@@ -60,6 +60,7 @@ public final class Agent {
             inst.appendToSystemClassLoaderSearch(new JarFile(writePinJar(cert)));
             inst.addTransformer(new UrlRewriter(server));
             inst.addTransformer(new LauncherFixes());
+            NewsScroller.start(server);
         } catch (Exception e) {
             log("ERROR: el agente no pudo iniciar; el launcher intentara usar los servidores originales.");
             e.printStackTrace(log);

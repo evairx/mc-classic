@@ -15,7 +15,8 @@
 //!
 //! The version is 1.7.2 unless the command line says otherwise: `Minecraft.exe -version 1.21`.
 //! Static files live in `server/www/<host>/<path>`, so the tree reads like a mirror of the 2012
-//! servers. There is no console: messages go to `server/server.log`, errors to a dialog box.
+//! servers; the news come from `assets/` (`news.rs`). There is no console: messages go to
+//! `server/server.log`, errors to a dialog box.
 
 #![windows_subsystem = "windows"]
 
@@ -29,6 +30,7 @@ mod dialog;
 mod game;
 mod minecraft_download;
 mod mojang;
+mod news;
 mod runtime;
 
 use std::{
@@ -71,7 +73,6 @@ const LAUNCHER_VERSION: &str = "13";
 
 const MINECRAFT_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/Minecraft.exe"));
 const AGENT_JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/classic-agent.jar"));
-const NEWS: &[u8] = include_bytes!("../assets/news.html");
 
 static LOG: OnceLock<Mutex<fs::File>> = OnceLock::new();
 
@@ -170,7 +171,9 @@ fn run() -> Result<()> {
 
     install(&dirs.home.join("Minecraft.exe"), MINECRAFT_EXE)?;
     install(&dirs.server.join("classic-agent.jar"), AGENT_JAR)?;
-    install(&dirs.www.join("mcupdate.tumblr.com").join("index.html"), NEWS)?;
+    for (name, bytes) in news::FILES {
+        install(&mojang::under(&dirs.www.join(news::DIR), name)?, bytes)?;
+    }
 
     let app = Arc::new(App {
         dirs,
@@ -275,6 +278,8 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
         .route("/login.minecraft.net/", post(login))
         .route("/classic/play", post(play))
         .route("/classic/status", get(status))
+        .route("/mcupdate.tumblr.com/", get(news::first_page))
+        .route("/mcupdate.tumblr.com/page/{page}", get(news::more))
         .fallback(static_file)
         .with_state(app.clone());
 
