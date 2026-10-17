@@ -2,7 +2,7 @@ name: Release
 
 # main is production. Each folder at the root with a version.json is a launcher with its own
 # versions: when main has a version that has no release yet, it is built on Windows and published
-# as <folder>-<version>, such as v2012-13-0.1.0, with its Minecraft.exe and that file's SHA-256.
+# as <folder>-<version>, such as 2012-0.1.0, with its Minecraft.exe and that file's SHA-256.
 # Work happens on other branches; merging into main with a new version in version.json releases
 # it, and the launchers out there, which read their version.json on main, offer the update.
 #

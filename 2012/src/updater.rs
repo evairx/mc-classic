@@ -1,5 +1,5 @@
 //! Updates of this launcher. Each launcher in the repository has its own version.json and
-//! releases on its own, tagged `<folder>-<version>`, such as `v2012-13-0.1.1`, with its
+//! releases on its own, tagged `<folder>-<version>`, such as `2012-0.1.1`, with its
 //! `Minecraft.exe` and that file's SHA-256 (`.github/workflows/release.yml`). This one reads its
 //! version.json on main, the production branch; when it is newer and its release is out, the agent
 //! asks the player (UpdateCheck.java). If they say yes, the launcher closes, the new exe replaces
@@ -12,8 +12,8 @@ use crate::{dialog, mojang, Result};
 /// The version of this build, from version.json (build.rs).
 pub const CURRENT: &str = env!("CLASSIC_VERSION");
 /// This launcher's folder in the repository: its version.json, and the start of its tags.
-const FOLDER: &str = "v2012-13";
-const VERSION_URL: &str = "https://raw.githubusercontent.com/evairx/mc-classic/main/v2012-13/version.json";
+const FOLDER: &str = "2012";
+const VERSION_URL: &str = "https://raw.githubusercontent.com/evairx/mc-classic/main/2012/version.json";
 const DOWNLOADS: &str = "https://github.com/evairx/mc-classic/releases/download";
 
 #[derive(Clone)]

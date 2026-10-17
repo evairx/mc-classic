@@ -51,7 +51,7 @@ final class LauncherOptions implements AWTEventListener {
     private static final String OPTIONS_PANEL = "net.minecraft.OptionsPanel";
     private static final String LOGIN_FORM = "net.minecraft.LoginForm";
     /** What the window shows as the game directory; "Open Game Dir" opens the real folder. */
-    private static final String LOCATION = "%APPDATA%/Roaming/mc-classic/2012-13/instances";
+    private static final String LOCATION = "%APPDATA%/Roaming/mc-classic/2012/instances";
     private static final String AUTOMATIC_JAVA = "Automatic (Mojang's Java)";
     private static final long FIND_MILLIS = 500;
     private static final long GIVE_UP_MILLIS = 120000;

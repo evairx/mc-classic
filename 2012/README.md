@@ -1,4 +1,4 @@
-# Minecraft Launcher 2012 (v13)
+# Minecraft Launcher 2012
 
 El launcher original de Minecraft de 2012, versión 13, adaptado para hoy: funciona de nuevo y abre
 las versiones nuevas de Minecraft Java, pero sigue siendo el mismo launcher. No se modifica ni un
@@ -21,7 +21,7 @@ Un solo `Minecraft.exe` que lleva dentro el launcher original, un agente Java y 
   usuario, versión, resolución, Java y argumentos JVM de cada perfil, y los del launcher.
 - **Solo queda el juego.** Al iniciar el juego se cierran el launcher y este programa. Las versiones
   hasta la 1.5.2 se juegan en la ventana del launcher, así que esa ventana sigue abierta.
-- **Sin tocar tu Minecraft.** Todo vive en `%APPDATA%\mc-classic\2012-13`, nunca en
+- **Sin tocar tu Minecraft.** Todo vive en `%APPDATA%\mc-classic\2012`, nunca en
   `%APPDATA%\.minecraft`. Cada perfil tiene su carpeta en `instances\`, con sus propios mundos y
   opciones.
 
@@ -36,7 +36,7 @@ No hay que instalar Java: se descarga solo la primera vez, de los servidores de 
 
 ## Perfiles
 
-*Options* → editor de perfiles (se guardan en `%APPDATA%\mc-classic\2012-13\profiles.json`):
+*Options* → editor de perfiles (se guardan en `%APPDATA%\mc-classic\2012\profiles.json`):
 
 | Sección | Opción |
 |---|---|
@@ -48,7 +48,7 @@ Sin marcar, cada opción usa lo de siempre. Las versiones de Fabric traen el car
 Fabric: los mods van en `instances\<perfil>\.minecraft\mods`.
 
 El login está en modo pruebas: acepta cualquier usuario válido (2 a 16 letras, cifras o `_`) con
-cualquier contraseña. El registro queda en `%APPDATA%\mc-classic\2012-13\server\server.log`.
+cualquier contraseña. El registro queda en `%APPDATA%\mc-classic\2012\server\server.log`.
 
 ## Compilar
 
@@ -60,7 +60,7 @@ Hace falta:
   `MINECRAFT_EXE`. Es un archivo de Mojang y no está en el repositorio.
 
 ```
-cd v2012-13
+cd 2012
 cargo run
 ```
 
@@ -89,7 +89,7 @@ versiones. El trabajo se hace en ramas; `main` es producción:
 
 1. Al subir cambios a `main`, la Action `.github/workflows/release.yml` busca las carpetas cuya
    versión todavía no tiene release, compila su `Minecraft.exe` en Windows y lo publica en
-   *Releases* con la etiqueta `<carpeta>-<versión>`, como `v2012-13-0.1.0`.
+   *Releases* con la etiqueta `<carpeta>-<versión>`, como `2012-0.1.0`.
 2. Al abrirse, cada launcher lee su `version.json` de `main`. Si es más nueva y su release ya está
    publicada, pregunta "Would you like to update now?". Con *Yes* descarga el exe nuevo, comprueba
    su SHA-256, reemplaza al actual y se vuelve a abrir. Con *No* lo vuelve a preguntar la próxima

@@ -1,9 +1,9 @@
-//! Minecraft Launcher 2012 v13: the original 2012 Minecraft launcher, unmodified, working again,
+//! Minecraft Launcher 2012: the original 2012 Minecraft launcher, unmodified, working again,
 //! with every Minecraft version.
 //!
 //! This single executable carries the original `Minecraft.exe`, a Java agent and a local server.
 //! Opening it shows only the real launcher window:
-//! 1. it unpacks the original Minecraft.exe and the agent into `%APPDATA%\mc-classic\2012-13`,
+//! 1. it unpacks the original Minecraft.exe and the agent into `%APPDATA%\mc-classic\2012`,
 //!    and the first time downloads the Java 8 that Mojang publishes, so nothing has to be
 //!    installed;
 //! 2. it opens the launcher's JAR (inside Minecraft.exe) with that Java and the agent, which
@@ -78,7 +78,7 @@ const AGENT_JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/classic-agent
 
 static LOG: OnceLock<Mutex<fs::File>> = OnceLock::new();
 
-/// Everything lives under `%APPDATA%\mc-classic\2012-13`, never in the real `%APPDATA%\.minecraft`.
+/// Everything lives under `%APPDATA%\mc-classic\2012`, never in the real `%APPDATA%\.minecraft`.
 #[derive(Clone)]
 pub struct Dirs {
     /// The original Minecraft.exe and `profiles.json`.
@@ -235,15 +235,17 @@ fn run() -> Result<()> {
     // so a modern install and its worlds are never touched. Other launchers get their own
     // folders next to this one in mc-classic.
     let appdata = PathBuf::from(env::var_os("APPDATA").ok_or("la variable APPDATA no está definida")?);
-    let home = appdata.join("mc-classic").join("2012-13");
-    let moved = move_old_folder(&appdata.join("minecraft-launcher-classic"), &home);
+    let home = appdata.join("mc-classic").join("2012");
+    // Where earlier builds kept it.
+    let old = [appdata.join("mc-classic").join("2012-13"), appdata.join("minecraft-launcher-classic")];
+    let moved = old.iter().find(|old| move_old_folder(old, &home));
     let server = home.join("server");
     fs::create_dir_all(&server)?;
     let _ = LOG.set(Mutex::new(fs::File::create(server.join("server.log"))?));
     log!("Minecraft Launcher Classic {} ({}).", updater::CURRENT, if cfg!(debug_assertions) { "build de prueba" } else { "release" });
     updater::clean_up();
-    if moved {
-        log!("Datos movidos de minecraft-launcher-classic a {}", home.display());
+    if let Some(old) = moved {
+        log!("Datos movidos de {} a {}", old.display(), home.display());
     }
     let dirs = Dirs {
         www: server.join("www"),
