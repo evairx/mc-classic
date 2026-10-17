@@ -41,8 +41,17 @@ fn get(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+pub fn get_text(url: &str) -> Result<String> {
+    Ok(String::from_utf8(get(url)?)?)
+}
+
 pub fn get_json(url: &str) -> Result<Value> {
     Ok(serde_json::from_slice(&get(url)?)?)
+}
+
+/// Mojang's list of every version, with the latest release and snapshot.
+pub fn manifest() -> Result<Value> {
+    get_json(MANIFEST_URL)
 }
 
 /// Downloads a JSON file and refuses it unless its SHA-1 matches.
@@ -56,7 +65,7 @@ pub fn get_verified_json(url: &str, sha1: &str) -> Result<Value> {
 /// is used while Mojang lists the same SHA-1, and also when Mojang cannot be reached.
 pub fn version(game_dir: &Path, id: &str) -> Result<Value> {
     let path = game_dir.join("versions").join(id).join(format!("{id}.json"));
-    let manifest = match get_json(MANIFEST_URL) {
+    let manifest = match manifest() {
         Ok(manifest) => manifest,
         Err(e) if path.is_file() => {
             log!("Sin conexión con Mojang ({e}); uso la copia guardada de {id}.");
@@ -82,9 +91,10 @@ pub fn version(game_dir: &Path, id: &str) -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// The version's game jar, `versions/<id>/<id>.jar`.
+/// The version's game jar, `versions/<id>/<id>.jar`. A version built on another one (Fabric)
+/// names that one in `jar`.
 pub fn client(meta: &Value, game_dir: &Path) -> Result<Download> {
-    let id = meta["id"].as_str().ok_or("la versión no trae id")?;
+    let id = meta["jar"].as_str().or(meta["id"].as_str()).ok_or("la versión no trae id")?;
     Download::new(&meta["downloads"]["client"], game_dir.join("versions").join(id).join(format!("{id}.jar")))
 }
 
@@ -116,22 +126,29 @@ fn library_file(entry: &Value, libraries_dir: &Path) -> Result<Option<Download>>
 /// Mojang's rules for this machine (Windows 10 or 11, 64 bits, no optional features). No rules
 /// means allowed; otherwise the last rule that applies decides.
 pub fn allowed(rules: &Value) -> bool {
+    allowed_with(rules, &[])
+}
+
+/// `allowed`, with these optional features on, such as `has_custom_resolution`.
+pub fn allowed_with(rules: &Value, features: &[&str]) -> bool {
     let Some(rules) = rules.as_array() else { return true };
     let mut allowed = false;
-    for rule in rules.iter().filter(|rule| applies(rule)) {
+    for rule in rules.iter().filter(|rule| applies(rule, features)) {
         allowed = rule["action"] == "allow";
     }
     allowed
 }
 
-fn applies(rule: &Value) -> bool {
+fn applies(rule: &Value, features: &[&str]) -> bool {
     let os = &rule["os"];
     // `arch` only ever says "x86", meaning 32 bits. `version` is a regex; on Windows Mojang only
     // uses "^10\\.", which Windows 10 and 11 (both "10.0") match.
     os["name"].as_str().is_none_or(|name| name == "windows")
         && os["arch"].is_null()
         && os["version"].as_str().is_none_or(|v| "10.0".starts_with(&v.trim_start_matches('^').replace("\\.", ".")))
-        && rule["features"].as_object().is_none_or(|features| features.values().all(|on| on == false))
+        && rule["features"].as_object().is_none_or(|wanted| {
+            wanted.iter().all(|(feature, on)| *on == Value::Bool(features.contains(&feature.as_str())))
+        })
 }
 
 /// `root` joined with a relative path taken from a Mojang file or a jar. Refuses anything that

@@ -1,19 +1,19 @@
-//! Minecraft Launcher Classic: the original 2012 Minecraft launcher, unmodified, working again,
+//! Minecraft Launcher 2012 v13: the original 2012 Minecraft launcher, unmodified, working again,
 //! with every Minecraft version.
 //!
 //! This single executable carries the original `Minecraft.exe`, a Java agent and a local server.
 //! Opening it shows only the real launcher window:
-//! 1. it unpacks the original Minecraft.exe and the agent into
-//!    `%APPDATA%\minecraft-launcher-classic`, and the first time downloads the Java 8 that Mojang
-//!    publishes, so nothing has to be installed;
+//! 1. it unpacks the original Minecraft.exe and the agent into `%APPDATA%\mc-classic\2012-13`,
+//!    and the first time downloads the Java 8 that Mojang publishes, so nothing has to be
+//!    installed;
 //! 2. it opens the launcher's JAR (inside Minecraft.exe) with that Java and the agent, which
 //!    rewrites the launcher's dead `http://<host>/<path>` URLs to `https://127.0.0.1:25580/<host>/<path>`;
-//! 3. it answers those endpoints over HTTPS and prepares the chosen version from Mojang's current
-//!    servers while the player logs in: in the launcher itself if it can run it (up to 1.5.2),
-//!    otherwise through the bridge (`bridge.rs`);
-//! 4. it exits when the launcher and the game have closed.
+//! 3. it answers those endpoints over HTTPS and prepares the version of the selected profile
+//!    (`profiles.rs`, edited in the launcher's options) from Mojang's current servers while the
+//!    player logs in: in the launcher itself if it can run it (up to 1.5.2), otherwise through the
+//!    bridge (`bridge.rs`);
+//! 4. it exits once the game has started, or when the launcher closes: only the game is left.
 //!
-//! The version is 1.7.2 unless the command line says otherwise: `Minecraft.exe -version 1.21`.
 //! Static files live in `server/www/<host>/<path>`, so the tree reads like a mirror of the 2012
 //! servers; the news are `assets/`, served from this exe (`news.rs`). There is no console:
 //! messages go to `server/server.log`, errors to a dialog box.
@@ -31,7 +31,9 @@ mod game;
 mod minecraft_download;
 mod mojang;
 mod news;
+mod profiles;
 mod runtime;
+mod versions;
 
 use std::{
     collections::hash_map::RandomState,
@@ -56,18 +58,17 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use axum_server::tls_rustls::RustlsConfig;
+use hyper_util::{rt::TokioIo, service::TowerToHyperService};
+use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use md5::{Digest, Md5};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 /// The agent's default server address points here (`classic.server` in Agent.java).
 const PORT: u16 = 25580;
-/// The version played unless `-version` picks another.
-const DEFAULT_VERSION: &str = "1.7.2";
 /// Launcher build sent in the login form (`version=13`); anything else gets "Old version".
 const LAUNCHER_VERSION: &str = "13";
 
@@ -76,11 +77,10 @@ const AGENT_JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/classic-agent
 
 static LOG: OnceLock<Mutex<fs::File>> = OnceLock::new();
 
-/// Everything lives under `%APPDATA%\minecraft-launcher-classic`, never in the real
-/// `%APPDATA%\.minecraft`.
+/// Everything lives under `%APPDATA%\mc-classic\2012-13`, never in the real `%APPDATA%\.minecraft`.
 #[derive(Clone)]
 pub struct Dirs {
-    /// The original Minecraft.exe.
+    /// The original Minecraft.exe and `profiles.json`.
     home: PathBuf,
     /// Agent, certificate, served files and logs.
     server: PathBuf,
@@ -90,29 +90,40 @@ pub struct Dirs {
     /// Downloads every version shares, in the layout of Mojang's `.minecraft`: `versions`,
     /// `libraries` and `assets`.
     store: PathBuf,
-    /// The version's own folder, `instances\<version>`: `user.home` of the launcher and `APPDATA`
-    /// of the game. Versions do not share worlds or options: a newer version converts worlds so
-    /// that older ones cannot read them, and old versions crash on the options newer ones write.
-    instance: PathBuf,
-    /// `instance\.minecraft`: worlds, options, and the launcher's `bin`.
-    game: PathBuf,
+    /// `user.home` of the launcher: its `.minecraft` holds the launcher's `bin` and `lastlogin`.
+    launcher: PathBuf,
+    /// One folder per profile, `instances\<profile>`: `APPDATA` of the game, or `user.home` once
+    /// the game runs inside the launcher. Profiles do not share worlds or options: a newer version
+    /// converts worlds so that older ones cannot read them, and old versions crash on the options
+    /// newer ones write.
+    instances: PathBuf,
 }
 
-/// The command line: `-version <id>` (or `--version`) picks the version; anything else goes to
-/// the launcher, which understands `-u=<user>`, `-p=<password>` and `--noupdate`.
-struct Options {
-    version: String,
-    launcher_args: Vec<OsString>,
+impl Dirs {
+    fn instance(&self, profile: &profiles::Profile) -> PathBuf {
+        self.instances.join(profile.folder())
+    }
+
+    fn profiles(&self) -> PathBuf {
+        self.home.join("profiles.json")
+    }
 }
+
+type Prepare = std::result::Result<Prepared, String>;
 
 struct App {
     dirs: Dirs,
-    version: String,
-    prepared: OnceCell<std::result::Result<Prepared, String>>,
+    profiles: Mutex<profiles::Profiles>,
+    /// The last version prepared, by the profile's version, while it is the one selected.
+    prepared: AsyncMutex<Option<(String, Arc<Prepare>)>>,
+    /// The version selector's list, fetched once it is fetched without error.
+    versions: OnceCell<String>,
     bridge: Arc<bridge::Bridge>,
 }
 
 struct Prepared {
+    /// The version's id, such as `1.21.4` for `latest-release`.
+    id: String,
     /// `latestVersion` in the login reply. The launcher keeps it in `bin/version`.
     token: String,
     /// The version's JSON when it runs through the bridge rather than inside the launcher.
@@ -120,23 +131,45 @@ struct Prepared {
 }
 
 impl App {
-    /// Prepares the version on first use; logins and downloads wait for it.
-    async fn prepared(&self) -> &std::result::Result<Prepared, String> {
-        self.prepared
-            .get_or_init(|| async {
-                let (dirs, version) = (self.dirs.clone(), self.version.clone());
-                tokio::task::spawn_blocking(move || {
-                    let result = prepare(&dirs, &version).map_err(|e| e.to_string());
-                    if let Err(e) = &result {
-                        log!("ERROR al preparar Minecraft {version}: {e}");
-                        error_box(&format!("No se pudo preparar Minecraft {version}.\n\n{e}"));
-                    }
-                    result
-                })
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
-            })
-            .await
+    fn profile(&self) -> profiles::Profile {
+        self.profiles.lock().unwrap_or_else(PoisonError::into_inner).selected().clone()
+    }
+
+    /// Prepares the selected profile's version, unless it already is; logins and downloads wait
+    /// for it. A failure is not kept, so the next login tries again.
+    async fn prepared(&self) -> Arc<Prepare> {
+        let version = self.profile().version;
+        let mut cached = self.prepared.lock().await;
+        if let Some((held, prepared)) = cached.as_ref() {
+            if *held == version {
+                return prepared.clone();
+            }
+        }
+        let dirs = self.dirs.clone();
+        let spec = version.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let result = prepare(&dirs, &spec).map_err(|e| e.to_string());
+            if let Err(e) = &result {
+                log!("ERROR al preparar Minecraft {spec}: {e}");
+                error_box(&format!("No se pudo preparar Minecraft {spec}.\n\n{e}"));
+            }
+            result
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        let result = Arc::new(result);
+        if result.is_ok() {
+            *cached = Some((version, result.clone()));
+        }
+        result
+    }
+
+    /// Prepares the selected version in the background, so it is ready by the time of login.
+    fn prepare_soon(self: &Arc<Self>) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            let _ = app.prepared().await;
+        });
     }
 }
 
@@ -151,61 +184,52 @@ fn main() {
 
 fn run() -> Result<()> {
     // A fixed per-user folder lets this one file live anywhere. It is not %APPDATA%\.minecraft,
-    // so a modern install and its worlds are never touched.
-    let appdata = env::var_os("APPDATA").ok_or("la variable APPDATA no está definida")?;
-    let home = PathBuf::from(appdata).join("minecraft-launcher-classic");
+    // so a modern install and its worlds are never touched. Other launchers get their own
+    // folders next to this one in mc-classic.
+    let appdata = PathBuf::from(env::var_os("APPDATA").ok_or("la variable APPDATA no está definida")?);
+    let home = appdata.join("mc-classic").join("2012-13");
+    let moved = move_old_folder(&appdata.join("minecraft-launcher-classic"), &home);
     let server = home.join("server");
     fs::create_dir_all(&server)?;
     let _ = LOG.set(Mutex::new(fs::File::create(server.join("server.log"))?));
-    let options = parse_args(env::args_os().skip(1))?;
-    let instance = home.join("instances").join(&options.version);
+    if moved {
+        log!("Datos movidos de minecraft-launcher-classic a {}", home.display());
+    }
     let dirs = Dirs {
         www: server.join("www"),
         server,
         runtime: home.join("runtime"),
         store: home.join("data").join(".minecraft"),
-        game: instance.join(".minecraft"),
-        instance,
+        launcher: home.join("launcher"),
+        instances: home.join("instances"),
         home,
     };
+    fs::create_dir_all(&dirs.instances)?;
 
     install(&dirs.home.join("Minecraft.exe"), MINECRAFT_EXE)?;
     install(&dirs.server.join("classic-agent.jar"), AGENT_JAR)?;
 
     let app = Arc::new(App {
+        profiles: Mutex::new(profiles::Profiles::load(&dirs.profiles())),
         dirs,
-        version: options.version,
-        prepared: OnceCell::new(),
+        prepared: AsyncMutex::new(None),
+        versions: OnceCell::new(),
         bridge: Arc::default(),
     });
-    tokio::runtime::Runtime::new()?.block_on(serve(app.clone(), options.launcher_args))?;
-    app.bridge.wait_for_game();
-    log!("Juego cerrado.");
+    // The launcher understands `-u=<user>`, `-p=<password>` and `--noupdate`.
+    let launcher_args: Vec<OsString> = env::args_os().skip(1).collect();
+    tokio::runtime::Runtime::new()?.block_on(serve(app, launcher_args))?;
+    log!("Launcher cerrado.");
     Ok(())
 }
 
-fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Options> {
-    let mut version = None;
-    let mut launcher_args = Vec::new();
-    let mut args = args.peekable();
-    while let Some(arg) = args.next() {
-        let text = arg.to_string_lossy();
-        if let Some(value) = text.strip_prefix("-version=").or_else(|| text.strip_prefix("--version=")) {
-            version = Some(value.to_string());
-        } else if text == "-version" || text == "--version" {
-            let value = args.next().ok_or("Falta la versión después de -version, por ejemplo: -version 1.21")?;
-            version = Some(value.to_string_lossy().into_owned());
-        } else {
-            launcher_args.push(arg);
-        }
+/// Moves the folder of earlier builds to its new place, once: its downloads, Java and worlds
+/// stay. Returns whether it did.
+fn move_old_folder(old: &Path, new: &Path) -> bool {
+    if new.exists() || !old.is_dir() {
+        return false;
     }
-    let version = version.unwrap_or_else(|| DEFAULT_VERSION.to_string());
-    // Version ids name folders; Mojang's use only these characters ("1.14 Pre-Release 1", "b1.7.3").
-    let plain = version.bytes().all(|b| b.is_ascii_alphanumeric() || b" ._-".contains(&b));
-    if version.is_empty() || !plain || version.starts_with('.') {
-        return Err(format!("\"{version}\" no es una versión de Minecraft.").into());
-    }
-    Ok(Options { version, launcher_args })
+    new.parent().is_some_and(|parent| fs::create_dir_all(parent).is_ok()) && fs::rename(old, new).is_ok()
 }
 
 /// Writes a file this program owns unless it already holds these bytes. Skipping the write
@@ -223,23 +247,26 @@ fn install(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Gets the version ready for the launcher: in the launcher itself if its jar still has the
 /// applet, otherwise through the bridge.
 fn prepare(dirs: &Dirs, version: &str) -> Result<Prepared> {
-    let meta = mojang::version(&dirs.store, version)?;
+    let meta = versions::resolve(&dirs.store, version)?;
+    let id = meta["id"].as_str().ok_or("la versión no trae id")?.to_string();
     let client = mojang::client(&meta, &dirs.store)?;
     mojang::download_all(vec![client.clone()], &|_| {})?;
-    let prepared = if minecraft_download::has_applet(&client.path)? {
+    let prepared = if !versions::is_modded(version) && minecraft_download::has_applet(&client.path)? {
         let token = minecraft_download::serve_game(&dirs.www, &dirs.store.join("libraries"), &meta, &client.path)?;
-        Prepared { token, bridged: None }
+        Prepared { id, token, bridged: None }
     } else {
-        Prepared { token: minecraft_download::serve_bridge(&dirs.www)?, bridged: Some(meta) }
+        Prepared { id, token: minecraft_download::serve_bridge(&dirs.www)?, bridged: Some(meta) }
     };
     // The launcher offers "New update available" when bin/version holds something else, which
-    // happens when this exe brings a new bridge. Without the file it just installs.
-    let installed = dirs.game.join("bin").join("version");
+    // happens when the profile picks another version or this exe brings a new bridge. Without
+    // the file it just installs.
+    let installed = dirs.launcher.join(".minecraft").join("bin").join("version");
     if fs::read(&installed).is_ok_and(|held| held != java_utf(&prepared.token)) {
         fs::remove_file(&installed)?;
-        log!("bin/version era de otra versión: el launcher instalará {version} sin preguntar.");
+        log!("bin/version era de otra versión: el launcher instalará {} sin preguntar.", prepared.id);
     }
-    log!("Minecraft {version} listo ({}).", if prepared.bridged.is_some() { "fuera del launcher" } else { "dentro del launcher" });
+    let place = if prepared.bridged.is_some() { "fuera del launcher" } else { "dentro del launcher" };
+    log!("Minecraft {} listo ({place}).", prepared.id);
     Ok(prepared)
 }
 
@@ -256,7 +283,10 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
         .install_default()
         .map_err(|_| "no se pudo instalar el proveedor TLS")?;
     let (cert, key) = ensure_certificate(&app.dirs.server)?;
-    let tls = RustlsConfig::from_pem_file(cert, key).await?;
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![CertificateDer::from_pem_file(cert)?], PrivateKeyDer::from_pem_file(key)?)?;
+    let tls = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
 
     // Bind before opening the launcher, so a second copy stops here instead of at login.
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, PORT));
@@ -265,26 +295,27 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
     })?;
 
     // Prepare the version now, while Java downloads or the player types their login.
-    tokio::spawn({
-        let app = app.clone();
-        async move {
-            let _ = app.prepared().await;
-        }
-    });
+    app.prepare_soon();
     let router = Router::new()
         .route("/login.minecraft.net/", post(login))
         .route("/classic/play", post(play))
         .route("/classic/status", get(status))
+        .route("/classic/profiles", get(get_profiles).post(set_profiles))
+        .route("/classic/versions", get(version_list))
+        .route("/classic/started", post(started))
         .route("/mcupdate.tumblr.com/", get(news::first_page))
         .route("/mcupdate.tumblr.com/page/{page}", get(news::more))
         .route("/mcupdate.tumblr.com/{*path}", get(news::file))
         .fallback(static_file)
         .with_state(app.clone());
 
-    log!("Servidor local en https://{addr}. Versión: {}. Login en MODO PRUEBAS: acepta cualquier contraseña.", app.version);
-    let server = axum_server::tls_rustls::from_tcp_rustls(listener, tls).serve(router.into_make_service());
+    let profile = app.profile();
+    log!("Servidor local en https://{addr}. Perfil: {}, versión {}. Login en MODO PRUEBAS: acepta cualquier contraseña.", profile.name, profile.version);
+    listener.set_nonblocking(true)?;
+    let server = https(tokio::net::TcpListener::from_std(listener)?, tls, router);
     let dirs = app.dirs.clone();
-    let launcher = tokio::task::spawn_blocking(move || open_launcher(&dirs, &launcher_args));
+    let flags = app.profiles.lock().unwrap_or_else(PoisonError::into_inner).launcher_flags.clone();
+    let launcher = tokio::task::spawn_blocking(move || open_launcher(&dirs, &flags, &launcher_args));
     tokio::select! {
         result = server => result?,
         result = launcher => result??,
@@ -292,9 +323,23 @@ async fn serve(app: Arc<App>, launcher_args: Vec<OsString>) -> Result<()> {
     Ok(())
 }
 
-/// Opens the launcher with Mojang's Java 8, downloading it the first time, and waits until the
-/// launcher and the game have closed.
-fn open_launcher(dirs: &Dirs, launcher_args: &[OsString]) -> Result<()> {
+/// Answers HTTPS on `listener` with `router`, in HTTP/1.1: all the 2012 launcher and Java 8 speak.
+async fn https(listener: tokio::net::TcpListener, tls: tokio_rustls::TlsAcceptor, router: Router) -> Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let (tls, router) = (tls.clone(), router.clone());
+        tokio::spawn(async move {
+            let Ok(stream) = tls.accept(stream).await else { return };
+            let connection = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), TowerToHyperService::new(router));
+            let _ = connection.await;
+        });
+    }
+}
+
+/// Opens the launcher with Mojang's Java 8, downloading it the first time, and waits until it
+/// closes.
+fn open_launcher(dirs: &Dirs, flags: &str, launcher_args: &[OsString]) -> Result<()> {
     let java = runtime::Runtime::plan(&dirs.runtime, runtime::LAUNCHER)?;
     if !java.downloads.is_empty() {
         let downloads = java.downloads.clone();
@@ -319,18 +364,18 @@ fn open_launcher(dirs: &Dirs, launcher_args: &[OsString]) -> Result<()> {
 
     let mut agent = OsString::from("-javaagent:");
     agent.push(dirs.server.join("classic-agent.jar"));
-    // The agent points user.home here, so the launcher's .minecraft is the version's own.
-    let mut instance = OsString::from("-Dclassic.home=");
-    instance.push(&dirs.instance);
+    // The agent points user.home here, so the launcher's .minecraft is its own.
+    let mut home = OsString::from("-Dclassic.home=");
+    home.push(&dirs.launcher);
     let mut launcher = Command::new(&java.javaw);
     launcher
-        // The heap Launch4j asked for (RCDATA of the original exe); MinecraftLauncher relaunches
-        // itself with 1 GB unless it gets more than 511 MB.
-        .args(["-Xms512m", "-Xmx1024m"])
+        // The profiles' launcher flags come after the defaults, so they win.
+        .args(profiles::LAUNCHER_FLAGS.split_whitespace())
+        .args(flags.split_whitespace())
         // Without Java2D's Direct3D pipeline, which makes the window flash black while resizing.
         // The 2012 launcher passed this too when it relaunched itself.
         .arg("-Dsun.java2d.d3d=false")
-        .arg(instance)
+        .arg(home)
         .arg(agent)
         .arg("-cp")
         .arg(dirs.home.join("Minecraft.exe"))
@@ -389,10 +434,10 @@ async fn login(State(app): State<Arc<App>>, Form(form): Form<LoginForm>) -> Stri
     } else if !is_valid_username(&form.user) {
         "Bad login".to_string()
     } else {
-        match app.prepared().await {
+        match &*app.prepared().await {
             Ok(prepared) => format!("{}:deprecated:{}:{}", prepared.token, form.user, session_id()),
             // No colon, or the launcher would read it as a successful login.
-            Err(_) => format!("Minecraft {} no disponible", app.version).replace(':', " "),
+            Err(_) => format!("Minecraft {} no disponible", app.profile().version).replace(':', " "),
         }
     };
     let outcome = if reply.contains(':') { "OK" } else { reply.as_str() };
@@ -401,7 +446,7 @@ async fn login(State(app): State<Arc<App>>, Form(form): Form<LoginForm>) -> Stri
 }
 
 /// 2012 account names: 2 to 16 letters, digits or underscores.
-fn is_valid_username(name: &str) -> bool {
+pub fn is_valid_username(name: &str) -> bool {
     (2..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
@@ -428,9 +473,9 @@ async fn play(State(app): State<Arc<App>>, Form(form): Form<PlayForm>) -> (Statu
     if !is_valid_username(&form.user) {
         return (StatusCode::BAD_REQUEST, format!("El usuario \"{}\" no es válido.", form.user));
     }
-    let meta = match app.prepared().await {
+    let meta = match &*app.prepared().await {
         Ok(Prepared { bridged: Some(meta), .. }) => meta.clone(),
-        Ok(_) => return (StatusCode::CONFLICT, format!("Minecraft {} corre dentro del launcher.", app.version)),
+        Ok(prepared) => return (StatusCode::CONFLICT, format!("Minecraft {} corre dentro del launcher.", prepared.id)),
         Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, e.clone()),
     };
     let token = if !form.session.is_empty() && form.session.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -438,12 +483,72 @@ async fn play(State(app): State<Arc<App>>, Form(form): Form<PlayForm>) -> (Statu
     } else {
         session_id()
     };
-    app.bridge.start(app.dirs.clone(), meta, form.user, token);
+    let profile = app.profile();
+    let launch = bridge::Launch {
+        meta,
+        user: form.user,
+        token,
+        instance: app.dirs.instance(&profile),
+        flags: profile.game_flags(),
+        resolution: profile.resolution(),
+        java: (!profile.java.is_empty()).then(|| PathBuf::from(&profile.java)),
+    };
+    app.bridge.start(app.dirs.clone(), launch);
     (StatusCode::OK, "ok".to_string())
 }
 
 async fn status(State(app): State<Arc<App>>) -> String {
     app.bridge.status_text()
+}
+
+/// The profiles, for the launcher's options (see `profiles::Profiles::to_text`).
+async fn get_profiles(State(app): State<Arc<App>>) -> String {
+    app.profiles.lock().unwrap_or_else(PoisonError::into_inner).to_text(&app.dirs.instances)
+}
+
+/// Saves the profiles edited in the launcher's options, and prepares the selected version.
+async fn set_profiles(State(app): State<Arc<App>>, body: String) -> (StatusCode, String) {
+    let profiles = match profiles::Profiles::from_text(&body) {
+        Ok(profiles) => profiles,
+        Err(e) => return (StatusCode::BAD_REQUEST, e),
+    };
+    if let Err(e) = profiles.save(&app.dirs.profiles()) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("No se pudieron guardar los perfiles: {e}"));
+    }
+    let selected = profiles.selected().clone();
+    log!("Perfiles guardados. Perfil: {}, versión {}.", selected.name, selected.version);
+    *app.profiles.lock().unwrap_or_else(PoisonError::into_inner) = profiles;
+    app.prepare_soon();
+    (StatusCode::OK, "ok".to_string())
+}
+
+/// Every version a profile can pick, one `<spec>\t<label>` line each.
+async fn version_list(State(app): State<Arc<App>>) -> (StatusCode, String) {
+    let list = app
+        .versions
+        .get_or_try_init(|| async {
+            tokio::task::spawn_blocking(|| versions::list().map_err(|e| e.to_string()))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        })
+        .await;
+    match list {
+        Ok(text) => (StatusCode::OK, text.clone()),
+        Err(e) => {
+            log!("Sin lista de versiones: {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, e.clone())
+        }
+    }
+}
+
+/// The agent saw the game start inside the launcher: it needs nothing more from this program.
+async fn started() -> &'static str {
+    log!("Minecraft iniciado dentro del launcher; el servidor local se cierra.");
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        std::process::exit(0);
+    });
+    "ok"
 }
 
 /// Serves `www/<host>/<path>` with the ETag the launcher expects: the quoted MD5 of the file.
@@ -452,7 +557,7 @@ async fn static_file(State(app): State<Arc<App>>, method: Method, uri: Uri, head
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
     if uri.path().starts_with(minecraft_download::URL_PREFIX) {
-        if let Err(e) = app.prepared().await {
+        if let Err(e) = &*app.prepared().await {
             log!("{method} 503 {} (faltan los archivos del juego: {e})", uri.path());
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }

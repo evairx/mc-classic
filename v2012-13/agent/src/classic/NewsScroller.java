@@ -4,10 +4,7 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.EventQueue;
 import java.awt.Frame;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
 import java.net.URL;
 import javax.swing.BoundedRangeModel;
 import javax.swing.JEditorPane;
@@ -146,7 +143,7 @@ final class NewsScroller implements ChangeListener {
             public void run() {
                 String html;
                 try {
-                    html = read(server + NEWS + "page/" + page);
+                    html = Http.get(server + NEWS + "page/" + page);
                 } catch (IOException e) {
                     Agent.log("Noticias: no se pudo cargar la pagina " + page + ": " + e);
                     html = null;
@@ -180,27 +177,6 @@ final class NewsScroller implements ChangeListener {
         } catch (Exception e) {
             Agent.log("Noticias: no se pudo anadir la pagina " + page + ": " + e);
             finished = true;
-        }
-    }
-
-    private static String read(String url) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        connection.setConnectTimeout(5000);
-        connection.setReadTimeout(15000);
-        connection.setUseCaches(false);
-        if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
-            throw new IOException("HTTP " + connection.getResponseCode());
-        }
-        InputStream in = connection.getInputStream();
-        try {
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-            byte[] chunk = new byte[4096];
-            for (int n; (n = in.read(chunk)) > 0;) {
-                bytes.write(chunk, 0, n);
-            }
-            return bytes.toString("UTF-8");
-        } finally {
-            in.close();
         }
     }
 }

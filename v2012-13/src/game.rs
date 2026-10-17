@@ -1,52 +1,16 @@
-//! Opens the original launcher and waits until it and the game have closed.
-//!
-//! The game does not always run inside the launcher: newer versions are separate processes, and
-//! the launcher closes when they start. This process joins a job object first, so the launcher and
-//! every game inherit it, and everything is over once this process is the only one left in it.
+//! Opens the original launcher and waits until it closes. A game that runs apart from it (see
+//! `bridge.rs`) is not waited for: it outlives the launcher and this program.
 
-use std::{io, mem, process::Command, ptr, thread, time::Duration};
+use std::{io, process::Command};
 
 use windows_sys::Win32::{
-    Foundation::{BOOL, HANDLE, HWND, LPARAM},
-    System::{
-        JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-            QueryInformationJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        },
-        Threading::GetCurrentProcess,
-    },
+    Foundation::{BOOL, HWND, LPARAM},
     UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible},
 };
 
 pub fn play(mut launcher: Command) -> io::Result<()> {
-    // SAFETY: plain Win32 calls; the job handle stays open for the life of the process.
-    let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-    if job.is_null() || unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    launcher.spawn()?;
-    while active_processes(job)? > 1 {
-        thread::sleep(Duration::from_millis(500));
-    }
+    launcher.spawn()?.wait()?;
     Ok(())
-}
-
-fn active_processes(job: HANDLE) -> io::Result<u32> {
-    // SAFETY: the buffer is a correctly sized JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.
-    unsafe {
-        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = mem::zeroed();
-        let ok = QueryInformationJobObject(
-            job,
-            JobObjectBasicAccountingInformation,
-            (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-            mem::size_of_val(&info) as u32,
-            ptr::null_mut(),
-        );
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(info.ActiveProcesses)
-    }
 }
 
 /// Whether the process has a visible top-level window, such as the game's.

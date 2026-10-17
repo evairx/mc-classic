@@ -60,7 +60,9 @@ public final class Agent {
             inst.appendToSystemClassLoaderSearch(new JarFile(writePinJar(cert)));
             inst.addTransformer(new UrlRewriter(server));
             inst.addTransformer(new LauncherFixes());
+            inst.addTransformer(new GameStart(server));
             NewsScroller.start(server);
+            LauncherOptions.start(server);
         } catch (Exception e) {
             log("ERROR: el agente no pudo iniciar; el launcher intentara usar los servidores originales.");
             e.printStackTrace(log);
@@ -74,8 +76,10 @@ public final class Agent {
     /**
      * The launcher and the game both use %APPDATA%\.minecraft, which today holds a modern
      * install whose worlds a 2012 client could damage. The rewriter hides APPDATA, so both fall
-     * back to user.home\.minecraft, and user.home points at a private folder: the version's own
-     * (classic.home, which Minecraft Launcher Classic passes), or data\ next to the agent's folder.
+     * back to user.home\.minecraft, and user.home points at a private folder: the launcher's own
+     * (classic.home, which the exe passes), or data\ next to the agent's folder. Once the
+     * launcher has settled on it, user.home moves to the selected profile's folder, where a game
+     * that runs inside the launcher keeps its worlds (LauncherOptions).
      */
     private static void isolateGameDirectory(File dir) {
         File home = new File(System.getProperty("classic.home", new File(dir.getParentFile(), "data").getPath()))

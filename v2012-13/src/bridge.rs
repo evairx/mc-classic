@@ -6,7 +6,7 @@
 //! applet (`bridge/`). The applet asks for `/classic/play`; this module then installs the version
 //! (its Java, libraries, natives and assets) and starts it as a separate process, while the applet
 //! draws `/classic/status` as the launcher's "Updating Minecraft" screen. Once the game window
-//! shows up, the applet closes the launcher.
+//! shows up, the applet closes the launcher, and with it this program: only the game is left.
 
 use std::{
     collections::HashMap,
@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    thread::{self, JoinHandle},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -30,16 +30,6 @@ use crate::{
 };
 
 const ASSETS_URL: &str = "https://resources.download.minecraft.net";
-/// The JVM options Mojang's launcher uses by default.
-const JVM_DEFAULTS: [&str; 7] = [
-    "-Xmx2G",
-    "-XX:+UnlockExperimentalVMOptions",
-    "-XX:+UseG1GC",
-    "-XX:G1NewSizePercent=20",
-    "-XX:G1ReservePercent=20",
-    "-XX:MaxGCPauseMillis=50",
-    "-XX:G1HeapRegionSize=32M",
-];
 /// What Mojang's launcher passes to versions whose JSON predates `arguments` (before 1.13).
 const LEGACY_JVM_ARGUMENTS: [&str; 6] = [
     "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump",
@@ -55,8 +45,21 @@ const WINDOW_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Default)]
 pub struct Bridge {
     status: Mutex<Status>,
-    /// Waits for the game to close, to report a crash.
-    watcher: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// What a start needs besides the folders: the version, the player and the profile.
+pub struct Launch {
+    pub meta: Value,
+    pub user: String,
+    pub token: String,
+    /// The profile's folder: `APPDATA` of the game, whose `.minecraft` holds worlds and options.
+    pub instance: PathBuf,
+    /// The profile's JVM flags.
+    pub flags: Vec<String>,
+    /// The game window's size, if the profile sets one.
+    pub resolution: Option<(u32, u32)>,
+    /// The profile's own `javaw.exe`, instead of the one Mojang publishes for the version.
+    pub java: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -78,7 +81,7 @@ enum State {
 
 impl Bridge {
     /// Installs and starts the version on a new thread, unless that has already begun.
-    pub fn start(self: &Arc<Self>, dirs: Dirs, meta: Value, user: String, token: String) {
+    pub fn start(self: &Arc<Self>, dirs: Dirs, launch: Launch) {
         {
             let mut status = self.lock();
             if status.state != State::Idle {
@@ -88,7 +91,7 @@ impl Bridge {
         }
         let bridge = self.clone();
         thread::spawn(move || {
-            if let Err(e) = bridge.launch(&dirs, &meta, &user, &token) {
+            if let Err(e) = bridge.launch(&dirs, &launch) {
                 log!("ERROR al iniciar el juego: {e}");
                 let mut status = bridge.lock();
                 status.state = State::Failed;
@@ -113,14 +116,6 @@ impl Bridge {
         )
     }
 
-    /// Returns once the game's watcher is done, which may be showing a crash report.
-    pub fn wait_for_game(&self) {
-        let watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner).take();
-        if let Some(watcher) = watcher {
-            let _ = watcher.join();
-        }
-    }
-
     fn lock(&self) -> MutexGuard<'_, Status> {
         self.status.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -132,14 +127,20 @@ impl Bridge {
         status.percent = percent.min(100);
     }
 
-    fn launch(&self, dirs: &Dirs, meta: &Value, user: &str, token: &str) -> Result<()> {
+    fn launch(&self, dirs: &Dirs, launch: &Launch) -> Result<()> {
+        let Launch { meta, user, token, instance, flags, resolution, java } = launch;
+        let game = instance.join(".minecraft");
         let id = meta["id"].as_str().ok_or("la versión no trae id")?;
         log!("Preparando Minecraft {id} fuera del launcher.");
         self.report("Determining packages to load", String::new(), 0);
 
         let component = meta["javaVersion"]["component"].as_str().unwrap_or(runtime::LAUNCHER);
-        let java = Runtime::plan(&dirs.runtime, component)?;
-        let mut downloads = java.downloads.clone();
+        let runtime = match java {
+            Some(_) => None,
+            None => Some(Runtime::plan(&dirs.runtime, component)?),
+        };
+        let javaw = java.clone().or_else(|| runtime.as_ref().map(|r| r.javaw.clone())).ok_or("sin Java")?;
+        let mut downloads = runtime.as_ref().map(|r| r.downloads.clone()).unwrap_or_default();
         let libraries_dir = dirs.store.join("libraries");
         let mut classpath = Vec::new();
         let mut natives = Vec::new();
@@ -165,7 +166,7 @@ impl Bridge {
             log_argument = Some(argument.replace("${path}", &config.path.to_string_lossy()));
             downloads.push(config);
         }
-        let assets = Assets::plan(meta, &dirs.store.join("assets"), &dirs.game)?;
+        let assets = Assets::plan(meta, &dirs.store.join("assets"), &game)?;
         downloads.extend(assets.objects.iter().map(|(_, download)| download.clone()));
 
         mojang::download_all(downloads, &|p| {
@@ -181,7 +182,9 @@ impl Bridge {
                 p.bytes * 90 / p.total_bytes.max(1),
             )
         })?;
-        java.finish()?;
+        if let Some(runtime) = &runtime {
+            runtime.finish()?;
+        }
 
         self.report("Extracting downloaded packages", String::new(), 95);
         let natives_dir = dirs.store.join("versions").join(id).join("natives");
@@ -190,13 +193,14 @@ impl Bridge {
             extract(jar, excluded, &natives_dir)?;
         }
         let game_assets = assets.lay_out()?;
-        fs::create_dir_all(&dirs.game)?;
+        fs::create_dir_all(&game)?;
 
         self.report(&format!("Starting Minecraft {id}"), String::new(), 100);
         let uuid = offline_uuid(user);
         let path = |p: &Path| p.to_string_lossy().into_owned();
         let classpath = classpath.iter().map(|p| path(p)).collect::<Vec<_>>().join(";");
-        let values: HashMap<&str, String> = HashMap::from([
+        let (width, height) = resolution.unwrap_or_default();
+        let mut values: HashMap<&str, String> = HashMap::from([
             ("auth_player_name", user.to_string()),
             ("auth_uuid", uuid.clone()),
             ("auth_access_token", token.to_string()),
@@ -208,7 +212,7 @@ impl Bridge {
             ("user_properties", "{}".to_string()),
             ("version_name", id.to_string()),
             ("version_type", meta["type"].as_str().unwrap_or("release").to_string()),
-            ("game_directory", path(&dirs.game)),
+            ("game_directory", path(&game)),
             ("assets_root", path(&assets.dir)),
             ("assets_index_name", assets.id.clone()),
             ("game_assets", path(&game_assets)),
@@ -219,34 +223,44 @@ impl Bridge {
             ("launcher_name", "minecraft-launcher-classic".to_string()),
             ("launcher_version", env!("CARGO_PKG_VERSION").to_string()),
         ]);
-        let jvm = arguments(meta, "jvm").unwrap_or_else(|| LEGACY_JVM_ARGUMENTS.map(String::from).to_vec());
-        let game_arguments = arguments(meta, "game").unwrap_or_else(|| {
-            meta["minecraftArguments"].as_str().unwrap_or_default().split_whitespace().map(String::from).collect()
-        });
+        values.insert("resolution_width", width.to_string());
+        values.insert("resolution_height", height.to_string());
+        let features: &[&str] = if resolution.is_some() { &["has_custom_resolution"] } else { &[] };
         let main_class = meta["mainClass"].as_str().ok_or("la versión no trae mainClass")?;
+        let jvm = arguments(meta, "jvm", features).unwrap_or_else(|| LEGACY_JVM_ARGUMENTS.map(String::from).to_vec());
+        let game_arguments = arguments(meta, "game", features).unwrap_or_else(|| {
+            let mut list: Vec<String> =
+                meta["minecraftArguments"].as_str().unwrap_or_default().split_whitespace().map(String::from).collect();
+            // 1.6 to 1.12 take the size as Mojang's launcher passed it then; older ones have no option.
+            if resolution.is_some() && main_class == "net.minecraft.client.main.Main" {
+                list.extend(["--width", "${resolution_width}", "--height", "${resolution_height}"].map(String::from));
+            }
+            list
+        });
 
         let log_path = dirs.server.join("game.log");
         let log = fs::File::create(&log_path)?;
-        let child = Command::new(&java.javaw)
-            .args(JVM_DEFAULTS)
+        let child = Command::new(&javaw)
+            .args(flags)
             // Log4Shell: Mojang's log configurations already fix it; this covers log4j 2.10+ too.
             .arg("-Dlog4j2.formatMsgNoLookups=true")
             .args(jvm.iter().map(|arg| substitute(arg, &values)))
             .args(log_argument)
             .arg(main_class)
             .args(game_arguments.iter().map(|arg| substitute(arg, &values)))
-            .current_dir(&dirs.game)
-            // Versions that look for %APPDATA%\.minecraft find their own folder instead.
-            .env("APPDATA", &dirs.instance)
+            .current_dir(&game)
+            // Versions that look for %APPDATA%\.minecraft find the profile's folder instead.
+            .env("APPDATA", instance)
             .stdout(log.try_clone()?)
             .stderr(log)
             .spawn()
-            .map_err(|e| format!("No se pudo abrir {}: {e}", java.javaw.display()))?;
-        log!("Minecraft {id} iniciado con {} (pid {}).", java.javaw.display(), child.id());
+            .map_err(|e| format!("No se pudo abrir {}: {e}", javaw.display()))?;
+        log!("Minecraft {id} iniciado con {} (pid {}).", javaw.display(), child.id());
         self.watch(child, id, log_path)
     }
 
-    /// Waits for the game window, then hands the process to a thread that reports a crash.
+    /// Waits for the game window. The game then runs on its own: it outlives the launcher and
+    /// this program, and writes its output to `game.log`.
     fn watch(&self, mut child: Child, id: &str, log_path: PathBuf) -> Result<()> {
         let started = Instant::now();
         while !game::has_visible_window(child.id()) && started.elapsed() < WINDOW_TIMEOUT {
@@ -256,22 +270,7 @@ impl Bridge {
             }
             thread::sleep(Duration::from_millis(250));
         }
-        log!("Ventana de Minecraft {id} abierta.");
-        let id = id.to_string();
-        let watcher = thread::spawn(move || match child.wait() {
-            Ok(exit) if !exit.success() => {
-                let tail = tail(&log_path);
-                log!("Minecraft {id} se cerró con un error ({exit}):\n{tail}");
-                crate::error_box(&format!(
-                    "Minecraft {id} se cerró con un error ({exit}).\n\n{tail}\n\nRegistro completo: {}",
-                    log_path.display()
-                ));
-            }
-            Ok(_) => log!("Minecraft {id} cerrado."),
-            Err(e) => log!("No se pudo esperar a Minecraft {id}: {e}"),
-        });
-        // Stored before the applet hears "running", so it is there when the game closes.
-        *self.watcher.lock().unwrap_or_else(PoisonError::into_inner) = Some(watcher);
+        log!("Ventana de Minecraft {id} abierta; el launcher se cierra.");
         self.lock().state = State::Running;
         Ok(())
     }
@@ -362,13 +361,14 @@ fn extract(jar: &Path, excluded: &[String], dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A modern version's `arguments.jvm` or `arguments.game`, keeping what the rules allow here.
-fn arguments(meta: &Value, kind: &str) -> Option<Vec<String>> {
+/// A modern version's `arguments.jvm` or `arguments.game`, keeping what the rules allow here with
+/// these optional features on.
+fn arguments(meta: &Value, kind: &str, features: &[&str]) -> Option<Vec<String>> {
     let mut list = Vec::new();
     for item in meta["arguments"][kind].as_array()? {
         let value = match item {
             Value::String(_) => item,
-            _ if mojang::allowed(&item["rules"]) => &item["value"],
+            _ if mojang::allowed_with(&item["rules"], features) => &item["value"],
             _ => continue,
         };
         match value {
