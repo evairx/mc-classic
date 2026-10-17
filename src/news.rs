@@ -53,7 +53,24 @@ fn text(name: &str) -> Option<&'static str> {
 }
 
 fn html(body: String) -> Response {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], without_link_borders(&body)).into_response()
+}
+
+/// Adds `border="0"` to every `<img>` that sets no border. JEditorPane ignores the stylesheet's
+/// `img { border: 0 }` and draws a 2px border in the link colour around images inside links.
+fn without_link_borders(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("<img") {
+        let end = rest[start..].find('>').map_or(rest.len(), |i| start + i);
+        out.push_str(&rest[..start + "<img".len()]);
+        if !rest[start..end].contains("border") {
+            out.push_str(" border=\"0\"");
+        }
+        rest = &rest[start + "<img".len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn not_found(what: &str) -> Response {
